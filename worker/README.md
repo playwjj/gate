@@ -41,8 +41,8 @@ npx wrangler deploy
 
 - 只输出通用 `vless://` 链接（v2rayN / v2rayNG / Shadowrocket / sing-box / Clash Meta 等可直接导入）
 - 只支持 TCP 和 IPv4 目标；UDP 只支持 DNS（53 端口），改走 DoH
-- SSTP 隧道内是一个极简 TCP 实现（无重传、固定 64KB 窗口），速度受 VPN Gate 节点带宽和延迟限制，本地实测约 60 KB/s，适合网页浏览，不适合大文件下载
-- 每条新连接都要重新做 SSTP/PPP 握手，首包延迟约 5–8 秒
+- SSTP 隧道内是极简 TCP 实现（无重传、固定 64KB 窗口），单连接速度上限约为 64KB ÷ Worker 到节点的往返延迟，实际还受 VPN Gate 节点带宽影响；丢包时连接会直接断开而不是变慢。适合网页浏览，不适合大文件下载
+- 每条新连接都要重新做 SSTP/PPP 多轮握手，首包会有明显延迟（几秒），具体取决于 Worker 到节点的往返延迟
 
 ## 许可证
 
