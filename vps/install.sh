@@ -1,5 +1,5 @@
 #!/bin/bash
-# gate VPS 安装脚本: SSTP 槽位 (sstpc/pppd) + xray (VLESS/WS) + nginx (订阅 + WS 反代)
+# gate VPS 安装脚本: SSTP 槽位 (sstpc/pppd) + WARP 槽位 (xray WireGuard) + xray (VLESS/WS) + nginx (订阅 + WS 反代)
 #
 # 用法 (root, 和 gate-manager.py 放在同一目录):
 #   GATE_UUID=<uuid> GATE_HOST=gate.example.com bash install.sh
@@ -13,6 +13,7 @@
 #   GATE_PORT       nginx 监听端口, 默认 18080
 #   GATE_ENTRIES    订阅里的连接地址 (Cloudflare 优选域名/IP, 逗号分隔, 如 a.com:443,1.2.3.4:443);
 #                   默认从 nodes.txt 的入口里自动验证挑选
+#   GATE_WARP       1 (默认) 时注册 Cloudflare WARP 并在订阅里多一个 WARP 节点, 0 关闭
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -21,6 +22,7 @@ export DEBIAN_FRONTEND=noninteractive
 GATE_SLOTS="${GATE_SLOTS:-8}"
 GATE_NODES_URL="${GATE_NODES_URL:-https://playwjj.github.io/gate/nodes.txt}"
 GATE_PORT="${GATE_PORT:-18080}"
+GATE_WARP="${GATE_WARP:-1}"
 GATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 XRAY_VERSION="v26.3.27"
 XRAY_SHA256="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
@@ -69,6 +71,7 @@ NODES_URL=$GATE_NODES_URL
 LISTEN=$GATE_LISTEN
 PORT=$GATE_PORT
 ENTRIES=${GATE_ENTRIES:-}
+WARP=$GATE_WARP
 EOF
 chmod 600 /etc/gate/gate.env
 
@@ -127,7 +130,10 @@ LimitNOFILE=1000000
 WantedBy=multi-user.target
 EOF
 
-echo "[gate] 4/6 生成 xray / nginx 配置"
+echo "[gate] 4/6 注册 WARP, 生成 xray / nginx 配置"
+if [ "$GATE_WARP" = 1 ]; then
+  /usr/local/bin/gate-manager warp-register || echo "[gate] WARP 注册失败, 本次不启用 WARP 槽位 (重新运行 install.sh 会再试)"
+fi
 /usr/local/bin/gate-manager xray-config > /usr/local/etc/xray/config.json
 /usr/local/bin/gate-manager nginx-config > /etc/nginx/sites-available/gate
 ln -sf /etc/nginx/sites-available/gate /etc/nginx/sites-enabled/gate

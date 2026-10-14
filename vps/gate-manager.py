@@ -7,10 +7,12 @@ gate-manager: 在 VPS 上维护 N 个 SSTP 槽位 (ppp1..pppN), 并生成 xray /
   gate-manager status         打印各槽位状态
   gate-manager xray-config    输出 xray 配置 JSON
   gate-manager nginx-config   输出 nginx 站点配置
+  gate-manager warp-register  注册 Cloudflare WARP 设备, 生成 WARP 槽位用的 WireGuard 配置 (已有则跳过)
 
 配置读取 /etc/gate/gate.env (由 install.sh 生成)
 """
 import base64
+import datetime
 import json
 import os
 import re
@@ -26,6 +28,9 @@ from concurrent.futures import ThreadPoolExecutor
 ENV_FILE = "/etc/gate/gate.env"
 STATE_FILE = "/var/lib/gate/state.json"
 SUB_FILE = "/var/lib/gate/sub.txt"
+WARP_FILE = "/etc/gate/warp.json"
+WARP_REG_URL = "https://api.cloudflareclient.com/v0a2158/reg"
+WARP_PEER_PORT = 2408
 WS_PATH = "/ws"
 PROBE_URL = "http://cp.cloudflare.com/generate_204"
 BAD_NODE_TTL = 3600  # 连接失败的节点 1 小时内不再尝试
@@ -47,6 +52,7 @@ def load_config():
                 cfg[key.strip()] = value.strip().strip('"').strip("'")
     cfg["SLOTS"] = int(cfg.get("SLOTS", "8"))
     cfg["XRAY_PORT"] = int(cfg.get("XRAY_PORT", "10086"))
+    cfg["WARP"] = cfg.get("WARP", "1") == "1"
     return cfg
 
 
@@ -127,6 +133,75 @@ def order_candidates(nodes):
     residential = [n for n in nodes if "住宅" in n["name"]]
     others = [n for n in nodes if "住宅" not in n["name"]]
     return interleave(residential) + interleave(others)
+
+
+# ---------------------------------------------------------------------------
+# WARP 槽位: xray 用 WireGuard 直连 Cloudflare WARP, 不经过 SSTP
+# ---------------------------------------------------------------------------
+def x25519_public_key(private):
+    """RFC 7748 X25519 标量乘基点, 免得依赖 wireguard-tools / cryptography"""
+    p = 2**255 - 19
+    k = bytearray(private)
+    k[0] &= 248
+    k[31] = (k[31] & 127) | 64
+    n = int.from_bytes(k, "little")
+    x1, x2, z2, x3, z3, swap = 9, 1, 0, 9, 1, 0
+    for t in reversed(range(255)):
+        bit = (n >> t) & 1
+        swap ^= bit
+        if swap:
+            x2, x3, z2, z3 = x3, x2, z3, z2
+        swap = bit
+        a, b, c, d = x2 + z2, x2 - z2, x3 + z3, x3 - z3
+        aa, bb, da, cb = a * a, b * b, d * a, c * b
+        e = aa - bb
+        x3, z3 = (da + cb) ** 2 % p, x1 * (da - cb) ** 2 % p
+        x2, z2 = aa * bb % p, e * (aa + 121665 * e) % p
+    if swap:
+        x2, z2 = x3, z3
+    return (x2 * pow(z2, p - 2, p) % p).to_bytes(32, "little")
+
+
+def warp_register():
+    if os.path.exists(WARP_FILE):
+        log(f"WARP 已注册 ({WARP_FILE}), 跳过")
+        return
+    private = bytearray(os.urandom(32))
+    private[0] &= 248
+    private[31] = (private[31] & 127) | 64
+    body = json.dumps({
+        "key": base64.b64encode(x25519_public_key(private)).decode(),
+        "install_id": "", "fcm_token": "", "model": "PC", "serial_number": "", "locale": "en_US",
+        "tos": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+    }).encode()
+    req = urllib.request.Request(WARP_REG_URL, data=body, method="POST", headers={
+        "Content-Type": "application/json", "User-Agent": "okhttp/3.12.1", "CF-Client-Version": "a-6.10-2158",
+    })
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        conf = json.load(resp)["config"]
+    peer, addresses = conf["peers"][0], conf["interface"]["addresses"]
+    warp = {
+        "private_key": base64.b64encode(private).decode(),
+        "peer_public_key": peer["public_key"],
+        # 用 IP 而不是 engage.cloudflareclient.com, 不依赖 DNS; 端口可改成 500/1701/4500
+        "endpoint": f"{peer['endpoint']['v4'].rsplit(':', 1)[0]}:{WARP_PEER_PORT}",
+        "address": [f"{addresses['v4']}/32", f"{addresses['v6']}/128"],
+        "reserved": list(base64.b64decode(conf["client_id"])),
+    }
+    fd = os.open(WARP_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(warp, f, indent=1)
+    log(f"WARP 注册成功: {warp['address'][0]} via {warp['endpoint']}")
+
+
+def load_warp(cfg):
+    if not cfg["WARP"]:
+        return None
+    try:
+        with open(WARP_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -253,16 +328,19 @@ def write_subscription(cfg, state):
     host = cfg["HOST"]
     # 每个槽位轮流用一个优选入口作为连接地址, host/sni 仍是 HOST; 没有可用入口时直接连 HOST
     entries = (state.get("entries") or {}).get("list") or [f"{host}:443"]
+    params = urllib.parse.urlencode({
+        "encryption": "none", "security": "tls", "sni": host, "fp": "chrome",
+        "type": "ws", "host": host, "path": WS_PATH,
+    })
     links = []
     for k in range(1, cfg["SLOTS"] + 1):
         slot = state["slots"].get(str(k))
         remark = f"{k:02d}-{slot['name']}" if slot else f"{k:02d}-连接中"
-        params = urllib.parse.urlencode({
-            "encryption": "none", "security": "tls", "sni": host, "fp": "chrome",
-            "type": "ws", "host": host, "path": WS_PATH,
-        })
         address = entries[(k - 1) % len(entries)]
         links.append(f"vless://{slot_uuid(cfg['UUID'], k)}@{address}?{params}#{urllib.parse.quote(remark)}")
+    if load_warp(cfg):
+        address = entries[cfg["SLOTS"] % len(entries)]
+        links.append(f"vless://{slot_uuid(cfg['UUID'], 'warp')}@{address}?{params}#WARP")
     os.makedirs(os.path.dirname(SUB_FILE), exist_ok=True)
     tmp = SUB_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -277,6 +355,8 @@ def status(cfg):
         ip = ppp_ip(k)
         desc = f"{slot['name']} {slot['node']}" if slot else "-"
         print(f"slot{k}  ppp{k}={ip or 'down':<15} {desc}")
+    warp = load_warp(cfg)
+    print(f"warp   {warp['endpoint'] if warp else '未启用'}")
     entries = state.get("entries") or {}
     print(f"优选入口 ({len(entries.get('list', []))}): {', '.join(entries.get('list', [])) or '-'}")
 
@@ -286,6 +366,32 @@ def status(cfg):
 # ---------------------------------------------------------------------------
 def xray_config(cfg):
     slots = range(1, cfg["SLOTS"] + 1)
+    clients = [{"id": slot_uuid(cfg["UUID"], k), "email": f"slot{k}"} for k in slots]
+    outbounds = [{
+        "tag": f"slot{k}",
+        "protocol": "freedom",
+        "settings": {"domainStrategy": "UseIPv4"},
+        "streamSettings": {"sockopt": {"interface": f"ppp{k}"}},
+    } for k in slots]
+    rules = [{"type": "field", "user": [f"slot{k}"], "outboundTag": f"slot{k}"} for k in slots]
+    warp = load_warp(cfg)
+    if warp:
+        clients.append({"id": slot_uuid(cfg["UUID"], "warp"), "email": "warp"})
+        outbounds.append({
+            "tag": "warp",
+            "protocol": "wireguard",
+            "settings": {
+                # 用户态 (gvisor) 实现: xray 有 CAP_NET_ADMIN 时默认会建内核 TUN 并改策略路由, 这里不需要
+                "noKernelTun": True,
+                "secretKey": warp["private_key"],
+                "address": warp["address"],
+                "peers": [{"publicKey": warp["peer_public_key"], "endpoint": warp["endpoint"], "keepAlive": 25}],
+                "reserved": warp["reserved"],
+                "mtu": 1280,
+                "domainStrategy": "ForceIPv4",
+            },
+        })
+        rules.append({"type": "field", "user": ["warp"], "outboundTag": "warp"})
     return {
         "log": {"loglevel": "warning"},
         # xray 内置 DNS 的查询也要过路由: 打上 tag 走 VPS 直连, 否则会落到默认的 block
@@ -294,21 +400,12 @@ def xray_config(cfg):
             "listen": "127.0.0.1",
             "port": cfg["XRAY_PORT"],
             "protocol": "vless",
-            "settings": {
-                "clients": [{"id": slot_uuid(cfg["UUID"], k), "email": f"slot{k}"} for k in slots],
-                "decryption": "none",
-            },
+            "settings": {"clients": clients, "decryption": "none"},
             "streamSettings": {"network": "ws", "wsSettings": {"path": WS_PATH}},
         }],
         # 第一个 outbound 是默认出口: 没匹配到槽位的流量直接丢弃, 不会从 VPS 自己的 IP 出去
-        "outbounds": [{"tag": "block", "protocol": "blackhole"}] + [{
-            "tag": f"slot{k}",
-            "protocol": "freedom",
-            "settings": {"domainStrategy": "UseIPv4"},
-            "streamSettings": {"sockopt": {"interface": f"ppp{k}"}},
-        } for k in slots] + [{"tag": "dns-direct", "protocol": "freedom"}],
-        "routing": {"rules": [{"type": "field", "inboundTag": ["dns-internal"], "outboundTag": "dns-direct"}]
-                    + [{"type": "field", "user": [f"slot{k}"], "outboundTag": f"slot{k}"} for k in slots]},
+        "outbounds": [{"tag": "block", "protocol": "blackhole"}] + outbounds + [{"tag": "dns-direct", "protocol": "freedom"}],
+        "routing": {"rules": [{"type": "field", "inboundTag": ["dns-internal"], "outboundTag": "dns-direct"}] + rules},
     }
 
 
@@ -350,6 +447,8 @@ def main():
         print(json.dumps(xray_config(cfg), indent=2))
     elif cmd == "nginx-config":
         print(nginx_config(cfg), end="")
+    elif cmd == "warp-register":
+        warp_register()
     else:
         sys.exit(__doc__)
 

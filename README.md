@@ -38,8 +38,11 @@ VPS（本仓库 vps/ 目录）
 ~~~text
 客户端 —VLESS/WS/TLS→ Cloudflare Tunnel → VPS nginx → xray ─┬─ slot1 → ppp1 —SSTP→ VPN Gate 节点 A → 目标网站
                                                              ├─ slot2 → ppp2 —SSTP→ VPN Gate 节点 B
-                                                             └─ …
+                                                             ├─ …
+                                                             └─ warp —WireGuard→ Cloudflare WARP
 ~~~
+
+WARP 槽位由 xray 内置的 WireGuard 直接连接 Cloudflare WARP，出口是 Cloudflare 的 IP（机房，不是住宅）。安装时会自动注册一个免费的 WARP 设备，凭据保存在 VPS 的 `/etc/gate/warp.json`。
 
 ---
 
@@ -99,7 +102,7 @@ GATE_UUID=$(cat /proc/sys/kernel/random/uuid)   # 主 UUID，记下来，订阅�
 GATE_UUID=$GATE_UUID GATE_HOST=gate.你的域名 bash vps/install.sh
 ~~~
 
-脚本会安装 sstp-client、xray（固定版本并校验 SHA256）、nginx，建立 8 个 SSTP 槽位，并启动每分钟一次的 gate-manager 定时任务。可选环境变量见 `install.sh` 开头的注释（槽位数 `GATE_SLOTS`、nginx 端口 `GATE_PORT` 等）。
+脚本会安装 sstp-client、xray（固定版本并校验 SHA256）、nginx，注册 WARP，建立 8 个 SSTP 槽位，并启动每分钟一次的 gate-manager 定时任务。可选环境变量见 `install.sh` 开头的注释（槽位数 `GATE_SLOTS`、nginx 端口 `GATE_PORT` 等）。
 
 > 安装脚本使用 `nodefaultroute`，不会修改 VPS 的默认路由，SSH 不受影响。
 
@@ -127,7 +130,7 @@ Zero Trust → 网络 → Tunnels → 你的隧道 → **已发布应用程序�
 https://gate.你的域名/sub/你的GATE_UUID
 ~~~
 
-订阅里有 8 个节点（`01-韩国-住宅` 这样命名），连接地址是轮流分配的 Cloudflare 优选入口，`host`/`sni` 是 `GATE_HOST`。每个节点固定对应一个槽位：槽位背后的 VPN Gate 节点失效时会自动换新，客户端配置不用改；刷新订阅只是更新节点名称里的国家。
+订阅里有 8 个 VPN Gate 节点（`01-韩国-住宅` 这样命名）和 1 个 `WARP` 节点，连接地址是轮流分配的 Cloudflare 优选入口，`host`/`sni` 是 `GATE_HOST`。每个节点固定对应一个槽位：槽位背后的 VPN Gate 节点失效时会自动换新，客户端配置不用改；刷新订阅只是更新节点名称里的国家。
 
 > GATE_UUID 就是访问凭证，不要公开分享订阅链接。
 
@@ -156,6 +159,7 @@ https://gate.你的域名/sub/你的GATE_UUID
 | `GATE_LISTEN` / `GATE_PORT` | nginx 监听地址和端口，默认 docker0 地址 / 18080 |
 | `GATE_NODES_URL` | nodes.txt 地址，默认本仓库的 GitHub Pages |
 | `GATE_ENTRIES` | 订阅里的连接地址（Cloudflare 优选域名/IP，逗号分隔）；默认从 nodes.txt 的入口里自动验证挑选，每小时重新验证 |
+| `GATE_WARP` | `1`（默认）注册 WARP 并在订阅里加一个 `WARP` 节点；`0` 关闭 |
 
 **vpngate.py**（一般不用改，也可以用同名环境变量覆盖）：
 
@@ -188,6 +192,11 @@ https://gate.你的域名/sub/你的GATE_UUID
 
 ### 某个节点连不上
 对应槽位背后的 VPN Gate 节点可能刚失效，等约 1 分钟 gate-manager 会自动换新；也可以在 VPS 上手动运行 `gate-manager sync`。
+
+### WARP 节点连不上
+- `cat /etc/gate/warp.json` 确认已注册；没有这个文件时重新运行 `install.sh`
+- `journalctl -u gate-xray -n 50` 查看 wireguard 报错；VPS 所在网络封了 UDP 2408 时，把 `warp.json` 里 `endpoint` 的端口改成 `500`、`1701` 或 `4500`，然后执行 `gate-manager xray-config > /usr/local/etc/xray/config.json && systemctl restart gate-xray`
+- 想换一个 WARP 设备：删除 `/etc/gate/warp.json` 后重新运行 `install.sh`
 
 ### 节点没有更新
 到 Actions 页看最近一次运行是否成功。GitHub 定时任务本身会延迟几分钟到半小时，属正常现象。公开仓库 60 天没有任何提交时，GitHub 会自动暂停定时任务，需要到 Actions 页重新启用。
