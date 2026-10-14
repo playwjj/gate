@@ -4,6 +4,8 @@
 
 > VPN Gate 的 SSTP 节点更新快，手动测试筛选太痛苦。本仓库把它全自动了：客户端只需添加一次订阅，之后刷新订阅就能拿到最新的可用节点。
 
+本项目基于 [hezhanleiok/gate](https://github.com/hezhanleiok/gate) 修改。
+
 ---
 
 ## 架构
@@ -187,6 +189,7 @@ https://你的gate-worker域名/你的UUID
 
 | 项目 | 用途 |
 | :--- | :--- |
+| [hezhanleiok/gate](https://github.com/hezhanleiok/gate) | 本项目的原始项目：节点抓取、检测与 GitHub Pages 发布流程 |
 | [VPN Gate](https://www.vpngate.net/) | SSTP 节点数据源 |
 | [lsh8848/cm-Workers-CheckSocks5](https://github.com/lsh8848/cm-Workers-CheckSocks5) | 检测 Worker：验证 SSTP 节点可用性并读取出口 IP |
 | [fdciabdul/Vpngate-Scraper-API](https://github.com/fdciabdul/Vpngate-Scraper-API) | VPN Gate 节点数据的 GitHub 镜像（官方源失效时回退） |
