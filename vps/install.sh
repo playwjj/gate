@@ -11,8 +11,6 @@
 #   GATE_NODES_URL  nodes.txt 地址, 默认 https://playwjj.github.io/gate/nodes.txt
 #   GATE_LISTEN     nginx 监听地址, 默认 docker0 的地址 (供容器里的 cloudflared 访问), 没有 docker0 时用 127.0.0.1
 #   GATE_PORT       nginx 监听端口, 默认 18080
-#   GATE_ENTRIES    订阅里的连接地址 (Cloudflare 优选域名/IP, 逗号分隔, 如 a.com:443,1.2.3.4:443);
-#                   默认从 nodes.txt 的入口里自动验证挑选
 #   GATE_WARP       1 (默认) 时注册 Cloudflare WARP 并在订阅里多一个 WARP 节点, 0 关闭
 #   GATE_WARP_B64   已有的 /etc/gate/warp.json 的 base64; 设置后复用这个 WARP 设备, 不再注册新设备
 #                   (VPS 定期重建时建议设置, 获取方法: base64 -w0 /etc/gate/warp.json)
@@ -72,7 +70,6 @@ SLOTS=$GATE_SLOTS
 NODES_URL=$GATE_NODES_URL
 LISTEN=$GATE_LISTEN
 PORT=$GATE_PORT
-ENTRIES=${GATE_ENTRIES:-}
 WARP=$GATE_WARP
 EOF
 chmod 600 /etc/gate/gate.env

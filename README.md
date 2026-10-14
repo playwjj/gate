@@ -130,7 +130,7 @@ Zero Trust → 网络 → Tunnels → 你的隧道 → **已发布应用程序�
 https://gate.你的域名/sub/你的GATE_UUID
 ~~~
 
-订阅里有 8 个 VPN Gate 节点（`01-韩国-住宅` 这样命名）和 1 个 `WARP` 节点，连接地址是轮流分配的 Cloudflare 优选入口，`host`/`sni` 是 `GATE_HOST`。每个节点固定对应一个槽位：槽位背后的 VPN Gate 节点失效时会自动换新，客户端配置不用改；刷新订阅只是更新节点名称里的国家。
+订阅里有 8 个 VPN Gate 节点（`01-韩国-住宅` 这样命名）和 1 个 `WARP` 节点，连接地址、`host`/`sni` 都是 `GATE_HOST`（客户端直接连 Cloudflare 解析出的地址）。每个节点固定对应一个槽位：槽位背后的 VPN Gate 节点失效时会自动换新，客户端配置不用改；刷新订阅只是更新节点名称里的国家。
 
 > GATE_UUID 就是访问凭证，不要公开分享订阅链接。
 
@@ -158,7 +158,6 @@ https://gate.你的域名/sub/你的GATE_UUID
 | `GATE_SLOTS` | 槽位数（同时保持的 SSTP 隧道数），默认 8 |
 | `GATE_LISTEN` / `GATE_PORT` | nginx 监听地址和端口，默认 docker0 地址 / 18080 |
 | `GATE_NODES_URL` | nodes.txt 地址，默认本仓库的 GitHub Pages |
-| `GATE_ENTRIES` | 订阅里的连接地址（Cloudflare 优选域名/IP，逗号分隔）；默认从 nodes.txt 的入口里自动验证挑选，每小时重新验证 |
 | `GATE_WARP` | `1`（默认）注册 WARP 并在订阅里加一个 `WARP` 节点；`0` 关闭 |
 | `GATE_WARP_B64` | 已有 `/etc/gate/warp.json` 的 base64；设置后复用该 WARP 设备，不再注册新设备 |
 
@@ -166,8 +165,6 @@ https://gate.你的域名/sub/你的GATE_UUID
 
 | 常量 / 环境变量 | 说明 |
 | :--- | :--- |
-| `EDGE_HOSTS` | nodes.txt 每行开头的入口域名（VPS 方案不使用，保留兼容） |
-| `OPTIMAL_API` | 优选 IP API，结果会和 `EDGE_HOSTS` 合并（同上） |
 | `CHECK_CONCURRENCY` | 检测并发数，默认 32 |
 | `CHECK_TIMEOUT` | 单个节点检测超时（秒），默认 90 |
 | `MAX_CHECK_NODES` | 最多检测的节点数，默认 0（不限） |

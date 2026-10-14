@@ -7,8 +7,7 @@ VPN Gate SSTP 节点检测流水线 (精简版)
   2. 只保留带 TCP 入口的 SSTP 节点
   3. 去重
   4. 并发调用检测 Worker
-  5. 获取并合并优选域名与优选 API (Cloudflare 入口)
-  6. 生成 public/data.json + public/index.html + public/nodes.txt
+  5. 生成 public/data.json + public/index.html + public/nodes.txt
 """
 
 import base64
@@ -80,21 +79,6 @@ COUNTRY_ZH = {
     "MD": "摩尔多瓦", "AM": "亚美尼亚", "KZ": "哈萨克斯坦", "UZ": "乌兹别克斯坦",
     "MN": "蒙古", "NP": "尼泊尔", "LK": "斯里兰卡", "MM": "缅甸",
 }
-
-# 静态优选域名池
-EDGE_HOSTS = [
-    h.strip()
-    for h in os.environ.get(
-        "EDGE_HOSTS",
-        "saas.sin.fan:443,cdn.204910.best:443,www.mfyx.cn:443,p.etime.vip:443,cdn.ctn32.us.kg:443,cf.877774.xyz:443,spring.io:443,"
-        "cf.nyanya.moe:443,www.sloomb.com:443,op.chinwa.eu.cc:443,www.leics.police.uk:443,securecircle.com:443,www.shopify.com:443,"
-        "www.carousell.sg:443,www.dbs.com.sg:443,openai.com:443,linear.app:443,www.bilibili.com:443,uspto.gov:443,www.vmware.com:443",
-    ).split(",")
-    if h.strip()
-]
-
-# 优选 API 地址配置 (支持逗号分隔多个，可配置在 GitHub Action Secret / Env 中)
-OPTIMAL_API = os.environ.get("OPTIMAL_API", "https://cf.090227.xyz/ct?ips=6&port=443")
 
 def _default_nodes_url() -> str:
     """nodes.txt 的 GitHub Pages 地址: 优先 NODES_URL, 否则从 Actions 的 GITHUB_REPOSITORY 自动推导"""
@@ -227,67 +211,6 @@ def parse_mirror_json(data):
             "config_b64": str(s.get("openvpn_configdata_base64") or s.get("config_b64") or "").strip(),
         })
     return rows
-
-# ---------------------------------------------------------------------------
-# 优选 API 获取与解析
-# ---------------------------------------------------------------------------
-def fetch_optimal_api_endpoints(api_urls_str):
-    """
-    拉取优选 API，解析如: 172.66.1.179:443#CF 电信优选 格式的内容
-    提取出纯 'IP:端口' (例如 172.66.1.179:443)
-    """
-    if not api_urls_str.strip():
-        return []
-    
-    endpoints = []
-    urls = [u.strip() for u in api_urls_str.split(",") if u.strip()]
-    for url in urls:
-        try:
-            log("OPTIMAL API", f"请求优选 API: {url}")
-            resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-            if resp.status_code == 200:
-                lines = resp.text.strip().splitlines()
-                count = 0
-                for line in lines:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    # 剥离 # 后的备注，提取 IP:端口
-                    endpoint = line.split("#")[0].strip()
-                    if endpoint:
-                        # 补充缺失端口默认 443
-                        if ":" not in endpoint:
-                            endpoint = f"{endpoint}:443"
-                        endpoints.append(endpoint)
-                        count += 1
-                log("OPTIMAL API", f"成功从 API 获取到 {count} 个优选端点")
-            else:
-                log("OPTIMAL API", f"API 返回状态码异常: {resp.status_code}")
-        except Exception as e:
-            log("OPTIMAL API", f"拉取优选 API 失败 ({url}): {e}")
-    return endpoints
-
-def get_combined_edge_hosts():
-    """
-    合并静态优选域名与优选 API 端点
-    """
-    # 1. 优先读取 HOSTS_ENTRY 或 EDGE_HOSTS
-    _entry = os.environ.get("HOSTS_ENTRY", "").strip()
-    static_hosts = [e.strip() for e in _entry.split(",") if e.strip()] if _entry else EDGE_HOSTS
-
-    # 2. 拉取优选 API 端点
-    api_hosts = fetch_optimal_api_endpoints(OPTIMAL_API)
-
-    # 3. 合并与去重 (保留原始列表顺序)
-    combined = []
-    seen = set()
-    for h in static_hosts + api_hosts:
-        if h and h not in seen:
-            seen.add(h)
-            combined.append(h)
-
-    log("EDGE POOL", f"汇总入口地址池: 静态域名 {len(static_hosts)} 个, API 获取 {len(api_hosts)} 个, 合并有效入口共 {len(combined)} 个")
-    return combined if combined else EDGE_HOSTS
 
 # ---------------------------------------------------------------------------
 # 筛选 SSTP 节点
@@ -431,14 +354,12 @@ def build_outputs(results, raw_count, sstp_count, source):
     }
     return data
 
-def build_nodes_text(data, edge_hosts):
+def build_nodes_text(data):
     """
-    生成纯节点行版本 (无注释): 每行 = 入口地址#名字$sstp://...
+    生成纯节点行版本 (无注释): 每行 = #名字$sstp://...
     """
     countries = data["countries"]
-    edge = edge_hosts
     lines = []
-    idx = 0
     ordered = sorted(countries.items(), key=lambda kv: (-int(kv[1].get("count") or 0), str(kv[1].get("code") or kv[0])))
     for cname, grp in ordered:
         code = str(grp.get("code") or "?").upper()
@@ -447,16 +368,12 @@ def build_nodes_text(data, edge_hosts):
         res_nodes = [n for n in nodes if n.get("residential") == "residential"]
         dc_nodes = [n for n in nodes if n.get("residential") != "residential"]
         for i, n in enumerate(res_nodes, 1):
-            entry = edge[idx % len(edge)]
-            idx += 1
-            lines.append(f"{entry}#{zh}-住宅-{i:02d}$sstp://vpn:vpn@{n['host']}:{n['port']}")
+            lines.append(f"#{zh}-住宅-{i:02d}$sstp://vpn:vpn@{n['host']}:{n['port']}")
         for i, n in enumerate(dc_nodes, 1):
-            entry = edge[idx % len(edge)]
-            idx += 1
-            lines.append(f"{entry}#{zh}-机房-{i:02d}$sstp://vpn:vpn@{n['host']}:{n['port']}")
+            lines.append(f"#{zh}-机房-{i:02d}$sstp://vpn:vpn@{n['host']}:{n['port']}")
     return "\n".join(lines) + "\n"
 
-def write_outputs(data, edge_hosts):
+def write_outputs(data):
     os.makedirs(PUBLIC_DIR, exist_ok=True)
     data_path = os.path.join(PUBLIC_DIR, "data.json")
     with open(data_path, "w", encoding="utf-8") as f:
@@ -477,7 +394,7 @@ def write_outputs(data, edge_hosts):
 
     nodes_path = os.path.join(PUBLIC_DIR, "nodes.txt")
     with open(nodes_path, "w", encoding="utf-8") as f:
-        f.write(build_nodes_text(data, edge_hosts))
+        f.write(build_nodes_text(data))
 
     return data_path, html_path, nodes_path
 
@@ -526,14 +443,10 @@ def main():
     log("RESULT", f"可用节点: {len(success)}")
     log("RESULT", f"国家数量: {data['stats']['countries']}")
 
-    # 动态拉取 API 并与静态优选域名混合
-    edge_hosts = get_combined_edge_hosts()
-
-    data_path, html_path, nodes_path = write_outputs(data, edge_hosts)
+    data_path, html_path, nodes_path = write_outputs(data)
     log("WEBSITE", f"生成 {os.path.relpath(data_path, REPO_DIR)}")
     log("WEBSITE", f"生成 {os.path.relpath(html_path, REPO_DIR)}")
     log("WEBSITE", f"生成 {os.path.relpath(nodes_path, REPO_DIR)}")
-    log("USAGE", f"自动轮换: 把 {NODES_URL} 填入 edgetunnel 后台「自定义优选IP」框 (一次配置, 之后自动更新)")
     log("WEBSITE", "完成 (GitHub Pages 部署由 workflow 执行)")
 
 if __name__ == "__main__":
