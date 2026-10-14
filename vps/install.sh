@@ -14,6 +14,8 @@
 #   GATE_ENTRIES    订阅里的连接地址 (Cloudflare 优选域名/IP, 逗号分隔, 如 a.com:443,1.2.3.4:443);
 #                   默认从 nodes.txt 的入口里自动验证挑选
 #   GATE_WARP       1 (默认) 时注册 Cloudflare WARP 并在订阅里多一个 WARP 节点, 0 关闭
+#   GATE_WARP_B64   已有的 /etc/gate/warp.json 的 base64; 设置后复用这个 WARP 设备, 不再注册新设备
+#                   (VPS 定期重建时建议设置, 获取方法: base64 -w0 /etc/gate/warp.json)
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -132,6 +134,16 @@ EOF
 
 echo "[gate] 4/6 注册 WARP, 生成 xray / nginx 配置"
 if [ "$GATE_WARP" = 1 ]; then
+  if [ -n "${GATE_WARP_B64:-}" ]; then
+    if (umask 077; echo "$GATE_WARP_B64" | base64 -d > /etc/gate/warp.json.tmp) \
+       && python3 -c 'import json, sys; w = json.load(open(sys.argv[1])); [w[k] for k in ("private_key", "peer_public_key", "endpoint", "address", "reserved")]' /etc/gate/warp.json.tmp 2>/dev/null; then
+      mv /etc/gate/warp.json.tmp /etc/gate/warp.json
+      echo "[gate] 复用 GATE_WARP_B64 中的 WARP 设备"
+    else
+      rm -f /etc/gate/warp.json.tmp
+      echo "[gate] GATE_WARP_B64 无法解析, 改为注册新的 WARP 设备"
+    fi
+  fi
   /usr/local/bin/gate-manager warp-register || echo "[gate] WARP 注册失败, 本次不启用 WARP 槽位 (重新运行 install.sh 会再试)"
 fi
 /usr/local/bin/gate-manager xray-config > /usr/local/etc/xray/config.json

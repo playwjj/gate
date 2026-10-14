@@ -42,7 +42,7 @@ VPS（本仓库 vps/ 目录）
                                                              └─ warp —WireGuard→ Cloudflare WARP
 ~~~
 
-WARP 槽位由 xray 内置的 WireGuard 直接连接 Cloudflare WARP，出口是 Cloudflare 的 IP（机房，不是住宅）。安装时会自动注册一个免费的 WARP 设备，凭据保存在 VPS 的 `/etc/gate/warp.json`。
+WARP 槽位由 xray 内置的 WireGuard 直接连接 Cloudflare WARP，出口是 Cloudflare 的 IP（机房，不是住宅）。安装时会自动注册一个免费的 WARP 设备，凭据保存在 VPS 的 `/etc/gate/warp.json`。VPS 会定期重建时，建议把这个文件的 base64（`base64 -w0 /etc/gate/warp.json`）存起来，下次安装时通过 `GATE_WARP_B64` 传入，复用同一个设备，不必每次都注册新设备。
 
 ---
 
@@ -160,6 +160,7 @@ https://gate.你的域名/sub/你的GATE_UUID
 | `GATE_NODES_URL` | nodes.txt 地址，默认本仓库的 GitHub Pages |
 | `GATE_ENTRIES` | 订阅里的连接地址（Cloudflare 优选域名/IP，逗号分隔）；默认从 nodes.txt 的入口里自动验证挑选，每小时重新验证 |
 | `GATE_WARP` | `1`（默认）注册 WARP 并在订阅里加一个 `WARP` 节点；`0` 关闭 |
+| `GATE_WARP_B64` | 已有 `/etc/gate/warp.json` 的 base64；设置后复用该 WARP 设备，不再注册新设备 |
 
 **vpngate.py**（一般不用改，也可以用同名环境变量覆盖）：
 
@@ -196,7 +197,7 @@ https://gate.你的域名/sub/你的GATE_UUID
 ### WARP 节点连不上
 - `cat /etc/gate/warp.json` 确认已注册；没有这个文件时重新运行 `install.sh`
 - `journalctl -u gate-xray -n 50` 查看 wireguard 报错；VPS 所在网络封了 UDP 2408 时，把 `warp.json` 里 `endpoint` 的端口改成 `500`、`1701` 或 `4500`，然后执行 `gate-manager xray-config > /usr/local/etc/xray/config.json && systemctl restart gate-xray`
-- 想换一个 WARP 设备：删除 `/etc/gate/warp.json` 后重新运行 `install.sh`
+- 想换一个 WARP 设备：删除 `/etc/gate/warp.json` 后重新运行 `install.sh`（设置了 `GATE_WARP_B64` 的话也要一并更新或去掉）
 
 ### 节点没有更新
 到 Actions 页看最近一次运行是否成功。GitHub 定时任务本身会延迟几分钟到半小时，属正常现象。公开仓库 60 天没有任何提交时，GitHub 会自动暂停定时任务，需要到 Actions 页重新启用。
