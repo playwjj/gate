@@ -5,6 +5,3 @@ __pycache__/
 
 Copy
 
-# wrangler 本地开发缓存
-.wrangler/
-.dev.vars

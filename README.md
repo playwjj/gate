@@ -1,6 +1,6 @@
 # VPN Gate SSTP 家宽节点 🚀
 
-自动抓取 [VPN Gate](https://www.vpngate.net/) 的 SSTP 家宽/机房节点，逐个验证可用性，按国家分组、标注住宅/机房，再通过自建的 Cloudflare Worker 转成 VLESS 订阅。**每 30 分钟自动更新一次。**
+自动抓取 [VPN Gate](https://www.vpngate.net/) 的 SSTP 家宽/机房节点，逐个验证可用性，按国家分组、标注住宅/机房，再由 VPS 上的 SSTP 客户端连接这些节点，以 VLESS 订阅的形式提供给客户端。**每 30 分钟自动更新一次。**
 
 > VPN Gate 的 SSTP 节点更新快，手动测试筛选太痛苦。本仓库把它全自动了：客户端只需添加一次订阅，之后刷新订阅就能拿到最新的可用节点。
 
@@ -26,9 +26,9 @@ VPN Gate 官方源
 生成 nodes.txt + 节点网页（GitHub Pages 发布，公开、不含任何密钥）
       │
       ▼
-gate-worker（Cloudflare，本仓库 worker/ 目录）
-      │  GET /<UUID>  拉取 nodes.txt → 输出 vless 订阅
-      │  WS  /sstp/…  VLESS 入站 → SSTP 握手 → 转发流量
+VPS（本仓库 vps/ 目录）
+      │  gate-manager 每 3 分钟检查 N 个槽位，失效的从 nodes.txt 换新节点
+      │  每个槽位 = 一条 SSTP 隧道（pppK）= 订阅里的一个节点
       ▼
 客户端订阅 → 使用 VPN Gate 家宽节点
 ~~~
@@ -36,7 +36,9 @@ gate-worker（Cloudflare，本仓库 worker/ 目录）
 使用时的流量路径：
 
 ~~~text
-客户端 —VLESS/WS/TLS→ 优选域名(Cloudflare) → gate-worker —SSTP→ VPN Gate 节点 → 目标网站
+客户端 —VLESS/WS/TLS→ Cloudflare Tunnel → VPS nginx → xray ─┬─ slot1 → ppp1 —SSTP→ VPN Gate 节点 A → 目标网站
+                                                             ├─ slot2 → ppp2 —SSTP→ VPN Gate 节点 B
+                                                             └─ …
 ~~~
 
 ---
@@ -47,7 +49,8 @@ gate-worker（Cloudflare，本仓库 worker/ 目录）
 
 - 一个 Cloudflare 账号（免费即可）
 - 一个 GitHub 账号
-- 一个已接入 Cloudflare 的域名（可选，推荐）
+- 一个已接入 Cloudflare 的域名
+- 一台能跑 PPP 的 Linux VPS（KVM 等完整虚拟机，Ubuntu/Debian；OpenVZ/LXC 一般没有 `/dev/ppp`），并已用 Cloudflare Tunnel（cloudflared）接入
 
 ### 第 1 步：部署检测 Worker
 
@@ -87,33 +90,50 @@ https://你的GitHub用户名.github.io/仓库名/            ← 节点网页
 https://你的GitHub用户名.github.io/仓库名/nodes.txt   ← 节点清单
 ~~~
 
-### 第 5 步：部署 gate-worker（VLESS 中转 + 订阅）
+### 第 5 步：在 VPS 上安装
 
-1. Cloudflare 控制台 → **Workers 和 Pages** → **创建** → **创建 Worker**，起名如 `gate-worker`，点 **部署**
-2. 点 **编辑代码**，把 [`worker/_worker.js`](./worker/_worker.js) 的全部内容粘贴进去，点 **部署**
-3. **设置 → 变量和机密**，添加：
+把 [`vps/`](./vps/) 目录复制到 VPS，以 root 运行：
 
-   | 名称 | 类型 | 值 |
-   | :--- | :--- | :--- |
-   | `UUID` | 密钥 | 任意 UUID，可用 https://www.uuidgenerator.net/ 生成 |
-   | `NODES_URL` | 文本 | 第 4 步得到的 `nodes.txt` 地址 |
-   | `HOST` | 文本（可选） | 订阅里的 sni/host，默认取访问订阅时的域名 |
-
-4. （推荐）**设置 → 域和路由** 绑定自定义域名
-
-命令行部署方式见 [worker/README.md](./worker/README.md)。
-
-### 第 6 步：客户端添加订阅
-
-订阅地址：
-
-~~~text
-https://你的gate-worker域名/你的UUID
+~~~bash
+GATE_UUID=$(cat /proc/sys/kernel/random/uuid)   # 主 UUID，记下来，订阅地址要用
+GATE_UUID=$GATE_UUID GATE_HOST=gate.你的域名 bash vps/install.sh
 ~~~
 
-支持导入 `vless://` 链接的客户端都可以用，例如 v2rayN、v2rayNG、Shadowrocket、sing-box、Clash Meta。之后**刷新订阅**即可拿到最新节点。
+脚本会安装 sstp-client、xray（固定版本并校验 SHA256）、nginx，建立 8 个 SSTP 槽位，并启动每 3 分钟一次的 gate-manager 定时任务。可选环境变量见 `install.sh` 开头的注释（槽位数 `GATE_SLOTS`、nginx 端口 `GATE_PORT` 等）。
 
-> UUID 就是访问凭证：订阅地址和每个节点都包含它，不要公开分享订阅链接。
+> 安装脚本使用 `nodefaultroute`，不会修改 VPS 的默认路由，SSH 不受影响。
+
+查看槽位状态：
+
+~~~bash
+gate-manager status
+~~~
+
+### 第 6 步：Cloudflare Tunnel 添加路由
+
+Zero Trust → 网络 → Tunnels → 你的隧道 → **已发布应用程序路由** → 添加：
+
+| 字段 | 填写 |
+| :--- | :--- |
+| 子域名 / 域 | `gate` / 你的域名（和 `GATE_HOST` 一致） |
+| 路径 | 留空 |
+| 服务 | `HTTP`，`172.17.0.1:18080` |
+
+> cloudflared 跑在 Docker 容器里时用 `172.17.0.1`（docker0）；直接装在 VPS 上时用 `127.0.0.1:18080`，安装时设置 `GATE_LISTEN=127.0.0.1`。安装脚本结束时会打印实际要填的地址。
+
+### 第 7 步：客户端添加订阅
+
+~~~text
+https://gate.你的域名/sub/你的GATE_UUID
+~~~
+
+订阅里有 8 个节点（`01-韩国-住宅` 这样命名）。每个节点固定对应一个槽位：槽位背后的 VPN Gate 节点失效时会自动换新，客户端配置不用改；刷新订阅只是更新节点名称里的国家。
+
+> GATE_UUID 就是访问凭证，不要公开分享订阅链接。
+
+### 每次重建 VPS 自动安装（可选）
+
+如果 VPS 会定期重建，可以在部署流程里检出本仓库，把 `vps/` 复制上去后执行 `install.sh`，`GATE_UUID` 放在 CI 的 Secret 里。
 
 ---
 
@@ -126,56 +146,47 @@ https://你的gate-worker域名/你的UUID
 | `CHECK_WORKER` | Secret（必填） | 检测 Worker 地址，形如 `https://xxx.workers.dev/check?sstp=vpn:vpn@` |
 | `NODES_URL` | Variable（可选） | nodes.txt 的发布地址，只用于日志提示；给 Pages 绑定自定义域名时设置，否则自动推导 |
 
-**gate-worker** 设置 → 变量和机密：
+**VPS 安装参数**（`vps/install.sh` 的环境变量）：
 
 | 名称 | 说明 |
 | :--- | :--- |
-| `UUID` | 必填，VLESS 用户 ID，同时是订阅路径 |
-| `NODES_URL` | 必填，nodes.txt 地址 |
-| `HOST` | 可选，订阅里的 sni/host |
+| `GATE_UUID` | 必填，主 UUID；各槽位 UUID 由它派生，也是订阅路径 |
+| `GATE_HOST` | 必填，客户端访问的域名（Tunnel 路由的主机名） |
+| `GATE_SLOTS` | 槽位数（同时保持的 SSTP 隧道数），默认 8 |
+| `GATE_LISTEN` / `GATE_PORT` | nginx 监听地址和端口，默认 docker0 地址 / 18080 |
+| `GATE_NODES_URL` | nodes.txt 地址，默认本仓库的 GitHub Pages |
 
 **vpngate.py**（一般不用改，也可以用同名环境变量覆盖）：
 
 | 常量 / 环境变量 | 说明 |
 | :--- | :--- |
-| `EDGE_HOSTS` | 入口优选域名列表，逗号分隔，格式 `域名:443` |
-| `OPTIMAL_API` | 优选 IP API，结果会和 `EDGE_HOSTS` 合并 |
+| `EDGE_HOSTS` | nodes.txt 每行开头的入口域名（VPS 方案不使用，保留兼容） |
+| `OPTIMAL_API` | 优选 IP API，结果会和 `EDGE_HOSTS` 合并（同上） |
 | `CHECK_CONCURRENCY` | 检测并发数，默认 32 |
 | `CHECK_TIMEOUT` | 单个节点检测超时（秒），默认 90 |
 | `MAX_CHECK_NODES` | 最多检测的节点数，默认 0（不限） |
 
 ---
 
-## 更换优选域名
-
-`nodes.txt` 每行的入口地址是「优选域名」，决定客户端连 Cloudflare 时用哪个 IP、稳不稳。
-
-1. 用测速工具（如 bestcf）测一批 Cloudflare 优选域名，挑延迟低、实际能连通的
-2. 打开 `vpngate.py`，把 `EDGE_HOSTS` 换成你测出来的域名（格式 `域名:443`）
-3. 提交推送，等下一次自动运行或手动触发 Action
-
----
-
-## 支持范围与限制
+## 说明与限制
 
 - 只输出 `vless://` 链接（VLESS + WebSocket + TLS）
-- 只支持 TCP 和 IPv4 目标；UDP 只支持 DNS（53 端口），由 Worker 改走 DoH
-- SSTP 隧道内是极简 TCP 实现（无重传、固定 64KB 窗口），单连接速度上限约为 64KB ÷ Worker 到节点的往返延迟，实际还受 VPN Gate 节点带宽影响；丢包时连接会直接断开而不是变慢。适合网页浏览，不适合大文件下载
-- 每条新连接都要重新做 SSTP/PPP 多轮握手，首包会有明显延迟（几秒），具体取决于 Worker 到节点的往返延迟
-- VPN Gate 是志愿者节点，个别节点随时可能下线，换一个节点或刷新订阅即可
+- SSTP 隧道由 Linux 内核的 PPP 承载，TCP/UDP 都支持；目标只支持 IPv4（VPN Gate 只分配 IPv4）
+- 速度主要取决于 VPN Gate 节点本身的带宽，各节点差别很大，同一节点不同时段也不同
+- 没有匹配到槽位的流量会被丢弃，不会从 VPS 自己的 IP 出去
+- VPN Gate 是志愿者节点，随时可能下线；gate-manager 最多 3 分钟内会把失效槽位换成新节点
 
 ---
 
 ## 常见问题
 
-### 只有几个节点能连
-入口优选域名大部分不通。用 bestcf 重新测速，把 `EDGE_HOSTS` 换成实测能通的域名。
-
 ### 所有节点都连不上
-- 订阅地址里的 UUID 是否和 gate-worker 的 `UUID` 一致
-- gate-worker 的 `NODES_URL` 是否能在浏览器打开
-- 先在浏览器打开订阅地址，能看到一串 base64 文本说明 Worker 正常
-- 在 Cloudflare 控制台 → gate-worker → **日志** 查看具体报错（如 `UUID 不匹配`、`TCP handshake through SSTP timed out`）
+- 先在浏览器打开订阅地址，能看到一串 base64 文本说明 Tunnel 和 nginx 正常
+- 在 VPS 上运行 `gate-manager status`，看各槽位的 `pppK` 是否有 IP
+- 查看日志：`journalctl -u gate-manager -n 50`、`journalctl -u gate-xray -n 50`
+
+### 某个节点连不上
+对应槽位背后的 VPN Gate 节点可能刚失效，等最多 3 分钟 gate-manager 会自动换新；也可以在 VPS 上手动运行 `gate-manager sync`。
 
 ### 节点没有更新
 到 Actions 页看最近一次运行是否成功。GitHub 定时任务本身会延迟几分钟到半小时，属正常现象。公开仓库 60 天没有任何提交时，GitHub 会自动暂停定时任务，需要到 Actions 页重新启用。
@@ -193,8 +204,5 @@ https://你的gate-worker域名/你的UUID
 | [VPN Gate](https://www.vpngate.net/) | SSTP 节点数据源 |
 | [lsh8848/cm-Workers-CheckSocks5](https://github.com/lsh8848/cm-Workers-CheckSocks5) | 检测 Worker：验证 SSTP 节点可用性并读取出口 IP |
 | [fdciabdul/Vpngate-Scraper-API](https://github.com/fdciabdul/Vpngate-Scraper-API) | VPN Gate 节点数据的 GitHub 镜像（官方源失效时回退） |
-| [cmliu/edgetunnel](https://github.com/cmliu/edgetunnel) | gate-worker 的 SSTP 握手代码改编自此项目 |
-
-## 许可证
-
-`worker/` 目录以 [GPL-2.0](./worker/LICENSE) 发布。
+| [sstp-client](https://sourceforge.net/projects/sstp-client/) | Linux SSTP 客户端 |
+| [Xray-core](https://github.com/XTLS/Xray-core) | VLESS 服务端 |

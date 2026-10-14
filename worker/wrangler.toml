@@ -1,7 +1,0 @@
-name = "gate-worker"
-main = "_worker.js"
-compatibility_date = "2025-09-01"
-
-# UUID 不要写在这里: 用 `wrangler secret put UUID` 或在 Cloudflare 控制台「变量和机密」中设置
-[vars]
-NODES_URL = "https://YOUR_GITHUB_USERNAME.github.io/gate/nodes.txt"
