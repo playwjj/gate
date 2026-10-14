@@ -41,7 +41,8 @@ VPNGATE_MIRROR = os.environ.get(
     "VPNGATE_MIRROR",
     "https://raw.githubusercontent.com/fdciabdul/Vpngate-Scraper-API/main/json/data.json",
 )
-WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "https://你的域名/check?sstp=vpn:vpn@")
+# 检测 Worker 地址: Action 中来自仓库 Secret CHECK_WORKER (日志自动打码, 不写入公开的 data.json)
+WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "").strip() or "https://你的域名/check?sstp=vpn:vpn@"
 CONCURRENCY = max(1, int(os.environ.get("CHECK_CONCURRENCY", "32")))
 CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT", "90"))
 MAX_CHECK_NODES = int(os.environ.get("MAX_CHECK_NODES", "0"))
@@ -424,7 +425,6 @@ def build_outputs(results, raw_count, sstp_count, source):
     data = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "source": source,
-        "worker": WORKER_CHECK_URL,
         "stats": stats,
         "countries": by_country,
         "available": available,
@@ -485,6 +485,8 @@ def write_outputs(data, edge_hosts):
 # main
 # ---------------------------------------------------------------------------
 def main():
+    if "你的域名" in WORKER_CHECK_URL:
+        die("未配置检测 Worker: 请在仓库 Settings → Secrets and variables → Actions → Secrets 添加 CHECK_WORKER (本地运行用环境变量 CHECK_WORKER)")
     session = requests.Session()
     rows, source = fetch_vpngate()
     raw_count = len(rows)
