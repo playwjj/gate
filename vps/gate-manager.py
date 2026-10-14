@@ -244,7 +244,8 @@ def xray_config(cfg):
     slots = range(1, cfg["SLOTS"] + 1)
     return {
         "log": {"loglevel": "warning"},
-        "dns": {"servers": ["1.1.1.1", "8.8.8.8"]},
+        # xray 内置 DNS 的查询也要过路由: 打上 tag 走 VPS 直连, 否则会落到默认的 block
+        "dns": {"tag": "dns-internal", "servers": ["1.1.1.1", "8.8.8.8"], "queryStrategy": "UseIPv4"},
         "inbounds": [{
             "listen": "127.0.0.1",
             "port": cfg["XRAY_PORT"],
@@ -261,8 +262,9 @@ def xray_config(cfg):
             "protocol": "freedom",
             "settings": {"domainStrategy": "UseIPv4"},
             "streamSettings": {"sockopt": {"interface": f"ppp{k}"}},
-        } for k in slots],
-        "routing": {"rules": [{"type": "field", "user": [f"slot{k}"], "outboundTag": f"slot{k}"} for k in slots]},
+        } for k in slots] + [{"tag": "dns-direct", "protocol": "freedom"}],
+        "routing": {"rules": [{"type": "field", "inboundTag": ["dns-internal"], "outboundTag": "dns-direct"}]
+                    + [{"type": "field", "user": [f"slot{k}"], "outboundTag": f"slot{k}"} for k in slots]},
     }
 
 
