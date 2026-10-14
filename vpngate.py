@@ -95,7 +95,23 @@ EDGE_HOSTS = [
 # 优选 API 地址配置 (支持逗号分隔多个，可配置在 GitHub Action Secret / Env 中)
 OPTIMAL_API = os.environ.get("OPTIMAL_API", "https://cf.090227.xyz/ct?ips=6&port=443")
 
-NODES_URL = os.environ.get("NODES_URL", "https://YOUR_GITHUB_USERNAME.github.io/gate/nodes.txt")
+def _default_nodes_url() -> str:
+    """nodes.txt 的 GitHub Pages 地址: 优先 NODES_URL, 否则从 Actions 的 GITHUB_REPOSITORY 自动推导"""
+    explicit = os.environ.get("NODES_URL", "").strip()
+    if explicit:
+        return explicit
+    repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if "/" in repo:
+        owner, name = repo.split("/", 1)
+        owner = owner.lower()
+        # 仓库名为 <用户名>.github.io 时是用户站点, 地址在根路径
+        if name.lower() == f"{owner}.github.io":
+            return f"https://{owner}.github.io/nodes.txt"
+        return f"https://{owner}.github.io/{name}/nodes.txt"
+    return "https://<你的GitHub用户名>.github.io/<仓库名>/nodes.txt"
+
+
+NODES_URL = _default_nodes_url()
 
 # ---------------------------------------------------------------------------
 # 日志
