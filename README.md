@@ -66,13 +66,20 @@ edgetunnel 后台「自定义优选IP」框填 https://…/nodes.txt
 
 在 GitHub 上打开本仓库，点 **Fork**，复制到你账号下。
 
-### 第 4 步：修改配置（重点）
+### 第 4 步：配置 Secret 密钥（重点）
 
-进你 fork 的仓库，修改 `vpngate.py`：
+为了防止检测 Worker 地址公开后被别人盗用、刷爆额度，检测地址保存在 GitHub Secrets（隐藏密钥）里，工作流自动读取，**不需要修改任何代码或工作流文件**。
 
-| 文件 | 位置 | 改成什么 | 为什么 |
-| :--- | :--- | :--- | :--- |
-| 仓库 Settings → Secrets and variables → Actions → **Secrets** | 新建 Secret `CHECK_WORKER` | 你的检测 Worker 地址，形如 `https://xxx.workers.dev/check?sstp=vpn:vpn@` | 检测统一走你自己的 Worker；用 Secret 保存，公开仓库和日志里都不会暴露 |
+1. 进入你 Fork 后的仓库，点击顶部菜单的 **Settings**
+2. 左侧边栏依次点击 **Secrets and variables → Actions**，停留在 **Secrets** 标签页
+3. 点击绿色按钮 **New repository secret**：
+   - **Name**：`CHECK_WORKER`（必须完全一致）
+   - **Secret**：第 2 步得到的完整检测 Worker 链接，例如 `https://check-sstp.你的用户名.workers.dev/check?sstp=vpn:vpn@`
+4. 点击 **Add secret** 保存
+
+> 未设置 `CHECK_WORKER` 时，工作流会直接失败并提示你添加。Secret 的值在 Actions 日志里会显示为 `***`，也不会写入公开的 `data.json`。
+
+**（可选）自定义域名**：如果给 GitHub Pages 绑定了自定义域名，可在同一页面的 **Variables** 标签页新建变量 `NODES_URL`，值为 `https://你的域名/nodes.txt`。不设置则自动推导为 `https://你的用户名.github.io/仓库名/nodes.txt`。
 
 > **注意**：`vpngate.py` 中**不需要**配置 `EDT_UUID` 和 `EDT_DOMAIN`。你之前看到的这两个变量是旧版遗留，现已删除。edgetunnel 后台会自己处理 UUID 和域名。
 
@@ -85,7 +92,7 @@ edgetunnel 后台「自定义优选IP」框填 https://…/nodes.txt
 
 ### 第 6 步：确认产物
 
-跑完后，你的站点地址是：
+跑完后，在 Actions 运行记录的最后一步 **Show site URL** 能看到实际地址，一般是：
 ~~~text
 https://你的GitHub用户名.github.io/仓库名/nodes.txt
 ~~~
@@ -122,13 +129,22 @@ https://你的GitHub用户名.github.io/仓库名/nodes.txt
 
 ---
 
-## 四、配置速查表（vpngate.py）
+## 四、配置速查表
+
+GitHub 仓库 Settings → Secrets and variables → Actions：
+
+| 名称 | 类型 | 说明 |
+| :--- | :--- | :--- |
+| `CHECK_WORKER` | Secret（必填） | 检测 Worker 地址，形如 `https://xxx.workers.dev/check?sstp=vpn:vpn@` |
+| `NODES_URL` | Variable（可选） | nodes.txt 的发布地址，仅用于日志提示；绑定自定义域名时设置，否则自动推导 |
+
+vpngate.py：
 
 | 常量 | 说明 |
 | :--- | :--- |
 | `EDGE_HOSTS` | 入口优选域名（换域名改这里） |
-| `WORKER_CHECK_URL` | 检测 Worker（本地运行默认值，Action 里用仓库 Secret `CHECK_WORKER` 覆盖） |
-| `NODES_URL` | nodes.txt 的发布地址，仅用于日志提示。Actions 中根据 `GITHUB_REPOSITORY` 自动推导，无需修改；自定义域名时可通过环境变量 `NODES_URL` 覆盖 |
+| `WORKER_CHECK_URL` | 检测 Worker，读取环境变量 `CHECK_WORKER`（Action 里来自仓库 Secret；本地运行时自行设置环境变量） |
+| `NODES_URL` | nodes.txt 的发布地址，仅用于日志提示。根据 `GITHUB_REPOSITORY` 自动推导，可用仓库 Variable `NODES_URL` 覆盖 |
 
 > 再次强调：`vpngate.py` **不需要**配置 `EDT_UUID` 和 `EDT_DOMAIN`，这两个参数属于 edgetunnel 本身。
 
