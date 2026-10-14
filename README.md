@@ -1,197 +1,197 @@
-# VPNGate SSTP 家宽节点（edgetunnel 链式代理） 🚀
+# VPN Gate SSTP 家宽节点 🚀
 
-自动抓取 [VPN Gate](https://www.vpngate.net/) 的 SSTP 家宽/机房节点，调用检测 Worker 逐个验证可用性，按国家分组、标注住宅/机房，生成可直接通过 **URL 自动轮换** 的节点清单。**每 30 分钟自动更新一次。**
+自动抓取 [VPN Gate](https://www.vpngate.net/) 的 SSTP 家宽/机房节点，逐个验证可用性，按国家分组、标注住宅/机房，再通过自建的 Cloudflare Worker 转成 VLESS 订阅。**每 30 分钟自动更新一次。**
 
-> 核心价值：VPN Gate 的 SSTP 节点 30 分钟就换一批，手动测试筛选太痛苦。本仓库把它全自动了——你只需把 `nodes.txt` 的网址填进 edgetunnel 后台一次，之后节点每 30 分钟自动换，零手动。
+> VPN Gate 的 SSTP 节点更新快，手动测试筛选太痛苦。本仓库把它全自动了：客户端只需添加一次订阅，之后刷新订阅就能拿到最新的可用节点。
 
 ---
 
-## 架构（数据流向）
+## 架构
 
 ~~~text
 VPN Gate 官方源
-      │  (每 30 分钟，GitHub Actions 定时抓取)
+      │  GitHub Actions 每 30 分钟定时抓取
       ▼
 筛选 SSTP 节点 → 去重
       │
       ▼
-检测 Worker (CheckSocks5，部署在 Cloudflare)
-      │  GET /check?sstp=vpn:vpn@host:port
-      │  返回 success + 出口 IP(住宅/机房判定)
+检测 Worker（Cloudflare）
+      │  GET /check?sstp=vpn:vpn@host:port → 是否可用 + 出口 IP（住宅/机房判定）
       ▼
-保留成功节点 → 按国家分组 → 住宅/机房标注 → 延迟排序
+保留可用节点 → 按国家分组 → 住宅/机房标注 → 延迟排序
       │
       ▼
-生成 nodes.txt (GitHub Pages 发布)
+生成 nodes.txt + 节点网页（GitHub Pages 发布，公开、不含任何密钥）
       │
       ▼
-edgetunnel 后台「自定义优选IP」框填 https://…/nodes.txt
-      │  edgetunnel 每次生成订阅时自动 fetch → 解析 $sstp:// → 套链式代理
+gate-worker（Cloudflare，本仓库 worker/ 目录）
+      │  GET /<UUID>  拉取 nodes.txt → 输出 vless 订阅
+      │  WS  /sstp/…  VLESS 入站 → SSTP 握手 → 转发流量
       ▼
-客户端订阅 edgetunnel 订阅 → 使用 SSTP 家宽节点 (每 30 分钟自动换)
+客户端订阅 → 使用 VPN Gate 家宽节点
+~~~
+
+使用时的流量路径：
+
+~~~text
+客户端 —VLESS/WS/TLS→ 优选域名(Cloudflare) → gate-worker —SSTP→ VPN Gate 节点 → 目标网站
 ~~~
 
 ---
 
-## 一、完整部署教程（从零开始）
+## 部署教程
 
 ### 前置条件
+
 - 一个 Cloudflare 账号（免费即可）
 - 一个 GitHub 账号
-- 一个已转入 Cloudflare 的域名（可选，但强烈推荐）
+- 一个已接入 Cloudflare 的域名（可选，推荐）
 
-### 第 1 步：部署 edgetunnel（核心使用端）
+### 第 1 步：部署检测 Worker
 
-1. 登录 Cloudflare 控制台，点击左侧 **Workers 和 Pages**
-2. 点击 **创建** → 选择 **创建 Worker**，起名 `edgetunnel`，点击 **部署**
-3. 打开 https://github.com/cmliu/edgetunnel/blob/main/_worker.js ，复制全部代码
-4. 回到 Cloudflare Worker 编辑器，粘贴代码，点击 **保存并部署**
-5. 在 **设置** → **变量** 中，添加变量 `ADMIN`，值填你的管理员密码
-6. 在 **绑定** 中，添加 KV 命名空间绑定，变量名称填 `KV`
-7. （推荐）在 **触发器** 中绑定自定义域名
-8. 浏览器访问 `https://你的域名/admin`，登录后台
-9. **在后台首页记下你的 UUID 和节点域名**（后面要用）
+1. 打开 https://github.com/lsh8848/cm-Workers-CheckSocks5
+2. Cloudflare 控制台 → **Workers 和 Pages** → **创建** → **创建 Worker**
+3. 把 `_worker.js` 的全部内容粘贴进编辑器，点 **部署**
+4. 记下 Worker 地址，形如 `https://check-sstp.你的用户名.workers.dev`
+5. 验证：浏览器打开 `https://你的检测Worker域名/check?sstp=vpn:vpn@任意节点:端口`，能返回 JSON 即成功
 
-> **关键**：`UUID` 和 `节点域名` 是 edgetunnel 自己的配置，**不需要**在 `vpngate.py` 中设置。`vpngate.py` 只负责生成 `nodes.txt`，edgetunnel 会用它自己的 UUID/域名去生成最终订阅。
+### 第 2 步：Fork 本仓库
 
-### 第 2 步：部署检测 Worker（CheckSocks5）
+在 GitHub 上打开本仓库，点 **Fork**，复制到你的账号下。
 
-1. 打开 https://github.com/lsh8848/cm-Workers-CheckSocks5 ，点 **Fork**
-2. 进 Cloudflare 控制台 → Workers 和 Pages → 创建 → 创建 Worker
-3. 把 `_worker.js` 的全部内容粘贴进编辑器，点「部署」
-4. 记下这个 Worker 的域名，形如 `https://xxx.你的用户名.workers.dev`
-5. 验证：浏览器打开 `https://你的Worker域名/check?sstp=vpn:vpn@任意节点:端口` ，能返回 JSON 即成功
+### 第 3 步：配置 Secret
 
-### 第 3 步：Fork 本仓库
+检测 Worker 地址保存在 GitHub Secrets 里，防止公开后被别人盗用额度。**不需要修改任何代码或工作流文件。**
 
-在 GitHub 上打开本仓库，点 **Fork**，复制到你账号下。
-
-### 第 4 步：配置 Secret 密钥（重点）
-
-为了防止检测 Worker 地址公开后被别人盗用、刷爆额度，检测地址保存在 GitHub Secrets（隐藏密钥）里，工作流自动读取，**不需要修改任何代码或工作流文件**。
-
-1. 进入你 Fork 后的仓库，点击顶部菜单的 **Settings**
-2. 左侧边栏依次点击 **Secrets and variables → Actions**，停留在 **Secrets** 标签页
-3. 点击绿色按钮 **New repository secret**：
+1. 进入你 Fork 后的仓库 → **Settings** → **Secrets and variables → Actions** → **Secrets** 标签页
+2. 点 **New repository secret**：
    - **Name**：`CHECK_WORKER`（必须完全一致）
-   - **Secret**：第 2 步得到的完整检测 Worker 链接，例如 `https://check-sstp.你的用户名.workers.dev/check?sstp=vpn:vpn@`
-4. 点击 **Add secret** 保存
+   - **Secret**：完整检测链接，例如 `https://check-sstp.你的用户名.workers.dev/check?sstp=vpn:vpn@`
+3. 点 **Add secret** 保存
 
-> 未设置 `CHECK_WORKER` 时，工作流会直接失败并提示你添加。Secret 的值在 Actions 日志里会显示为 `***`，也不会写入公开的 `data.json`。
+> 未设置 `CHECK_WORKER` 时，工作流会直接失败并提示添加。Secret 的值在 Actions 日志里显示为 `***`，也不会写入公开的网页数据。
 
-**（可选）自定义域名**：如果给 GitHub Pages 绑定了自定义域名，可在同一页面的 **Variables** 标签页新建变量 `NODES_URL`，值为 `https://你的域名/nodes.txt`。不设置则自动推导为 `https://你的用户名.github.io/仓库名/nodes.txt`。
+### 第 4 步：开启 GitHub Pages 与 Actions
 
-> **注意**：`vpngate.py` 中**不需要**配置 `EDT_UUID` 和 `EDT_DOMAIN`。你之前看到的这两个变量是旧版遗留，现已删除。edgetunnel 后台会自己处理 UUID 和域名。
+1. 仓库 → **Settings → Pages**，**Source** 选 **GitHub Actions**（选中即生效，没有保存按钮；不要点下方推荐工作流的 Configure）
+2. 进 **Actions** 页，若提示启用 Actions 就点启用
+3. 手动运行一次：**Actions → VPN Gate Node Check → Run workflow**
+4. 跑完看到绿色 ✓ 即成功，之后每 30 分钟自动运行
 
-### 第 5 步：开启 GitHub Pages 与 Actions
+运行记录最后一步 **Show site URL** 会显示实际地址，一般是：
 
-1. 进你 fork 的仓库 → Settings → Pages，Source 设为 **GitHub Actions**
-2. 进 Actions 页，若提示启用 Actions 就点启用
-3. 手动触发一次：Actions → VPN Gate Node Check → Run workflow → Run workflow
-4. 等它跑完（约 1 分钟），看到绿色 ✓ 即成功
-
-### 第 6 步：确认产物
-
-跑完后，在 Actions 运行记录的最后一步 **Show site URL** 能看到实际地址，一般是：
 ~~~text
-https://你的GitHub用户名.github.io/仓库名/nodes.txt
+https://你的GitHub用户名.github.io/仓库名/            ← 节点网页
+https://你的GitHub用户名.github.io/仓库名/nodes.txt   ← 节点清单
 ~~~
-浏览器打开，能看到一堆 `优选域名:443#国家-住宅-XX …` 的行，就说明全部打通了。
+
+### 第 5 步：部署 gate-worker（VLESS 中转 + 订阅）
+
+1. Cloudflare 控制台 → **Workers 和 Pages** → **创建** → **创建 Worker**，起名如 `gate-worker`，点 **部署**
+2. 点 **编辑代码**，把 [`worker/_worker.js`](./worker/_worker.js) 的全部内容粘贴进去，点 **部署**
+3. **设置 → 变量和机密**，添加：
+
+   | 名称 | 类型 | 值 |
+   | :--- | :--- | :--- |
+   | `UUID` | 密钥 | 任意 UUID，可用 https://www.uuidgenerator.net/ 生成 |
+   | `NODES_URL` | 文本 | 第 4 步得到的 `nodes.txt` 地址 |
+   | `HOST` | 文本（可选） | 订阅里的 sni/host，默认取访问订阅时的域名 |
+
+4. （推荐）**设置 → 域和路由** 绑定自定义域名
+
+命令行部署方式见 [worker/README.md](./worker/README.md)。
+
+### 第 6 步：客户端添加订阅
+
+订阅地址：
+
+~~~text
+https://你的gate-worker域名/你的UUID
+~~~
+
+支持导入 `vless://` 链接的客户端都可以用，例如 v2rayN、v2rayNG、Shadowrocket、sing-box、Clash Meta。之后**刷新订阅**即可拿到最新节点。
+
+> UUID 就是访问凭证：订阅地址和每个节点都包含它，不要公开分享订阅链接。
 
 ---
 
-## 二、使用教程（URL 自动轮换，一次配置永久生效）
+## 配置速查表
 
-1. 进 edgetunnel 后台（你的域名/admin），找到「自定义优选IP」文本框
-2. 粘贴**一行网址**：
-   ~~~text
-   https://你的GitHub用户名.github.io/仓库名/nodes.txt
-   ~~~
-3. 点保存
-4. 客户端刷新订阅 → 每次刷新 edgetunnel 都重新拉取一次 nodes.txt，节点自动更新
-
-> 原理：`nodes.txt` 是纯节点行版本（无注释头），每行 `入口域名:443#国家-住宅-01$sstp://vpn:vpn@节点:端口`。edgetunnel 下次生成订阅时会 fetch 这个网址、逐行解析成优选入口 + 链式代理指令。你只填一次，之后节点每 30 分钟自动换、零手动。
-
----
-
-## 三、如何更换优选域名
-
-入口地址用的是「优选域名」，决定客户端连 Cloudflare 用哪个 IP、稳不稳。
-
-### 在哪个文件改
-- 文件：vpngate.py
-- 位置：`EDGE_HOSTS = [ ... ]`
-
-### 改法
-1. 用测速工具（如 bestcf）测一批 Cloudflare 优选域名，挑「延迟低 + 实际能连通」的
-2. 打开 vpngate.py，把 `EDGE_HOSTS` 里的域名列表换成你测出来的（逗号分隔，格式 `域名:443`）
-3. 提交推送，等下一次自动运行或手动触发 Action
-
----
-
-## 四、配置速查表
-
-GitHub 仓库 Settings → Secrets and variables → Actions：
+**GitHub 仓库** Settings → Secrets and variables → Actions：
 
 | 名称 | 类型 | 说明 |
 | :--- | :--- | :--- |
 | `CHECK_WORKER` | Secret（必填） | 检测 Worker 地址，形如 `https://xxx.workers.dev/check?sstp=vpn:vpn@` |
-| `NODES_URL` | Variable（可选） | nodes.txt 的发布地址，仅用于日志提示；绑定自定义域名时设置，否则自动推导 |
+| `NODES_URL` | Variable（可选） | nodes.txt 的发布地址，只用于日志提示；给 Pages 绑定自定义域名时设置，否则自动推导 |
 
-vpngate.py：
+**gate-worker** 设置 → 变量和机密：
 
-| 常量 | 说明 |
+| 名称 | 说明 |
 | :--- | :--- |
-| `EDGE_HOSTS` | 入口优选域名（换域名改这里） |
-| `WORKER_CHECK_URL` | 检测 Worker，读取环境变量 `CHECK_WORKER`（Action 里来自仓库 Secret；本地运行时自行设置环境变量） |
-| `NODES_URL` | nodes.txt 的发布地址，仅用于日志提示。根据 `GITHUB_REPOSITORY` 自动推导，可用仓库 Variable `NODES_URL` 覆盖 |
+| `UUID` | 必填，VLESS 用户 ID，同时是订阅路径 |
+| `NODES_URL` | 必填，nodes.txt 地址 |
+| `HOST` | 可选，订阅里的 sni/host |
 
-> 再次强调：`vpngate.py` **不需要**配置 `EDT_UUID` 和 `EDT_DOMAIN`，这两个参数属于 edgetunnel 本身。
+**vpngate.py**（一般不用改，也可以用同名环境变量覆盖）：
+
+| 常量 / 环境变量 | 说明 |
+| :--- | :--- |
+| `EDGE_HOSTS` | 入口优选域名列表，逗号分隔，格式 `域名:443` |
+| `OPTIMAL_API` | 优选 IP API，结果会和 `EDGE_HOSTS` 合并 |
+| `CHECK_CONCURRENCY` | 检测并发数，默认 32 |
+| `CHECK_TIMEOUT` | 单个节点检测超时（秒），默认 90 |
+| `MAX_CHECK_NODES` | 最多检测的节点数，默认 0（不限） |
 
 ---
 
-## 五、常见问题
+## 更换优选域名
+
+`nodes.txt` 每行的入口地址是「优选域名」，决定客户端连 Cloudflare 时用哪个 IP、稳不稳。
+
+1. 用测速工具（如 bestcf）测一批 Cloudflare 优选域名，挑延迟低、实际能连通的
+2. 打开 `vpngate.py`，把 `EDGE_HOSTS` 换成你测出来的域名（格式 `域名:443`）
+3. 提交推送，等下一次自动运行或手动触发 Action
+
+---
+
+## 支持范围与限制
+
+- 只输出 `vless://` 链接（VLESS + WebSocket + TLS）
+- 只支持 TCP 和 IPv4 目标；UDP 只支持 DNS（53 端口），由 Worker 改走 DoH
+- SSTP 隧道内是极简 TCP 实现（无重传、固定窗口），速度受 VPN Gate 节点带宽限制，本地实测约 60 KB/s，适合网页浏览，不适合大文件下载
+- 每条新连接都要重新做 SSTP 握手，首包延迟约 5–8 秒
+- VPN Gate 是志愿者节点，个别节点随时可能下线，换一个节点或刷新订阅即可
+
+---
+
+## 常见问题
 
 ### 只有几个节点能连
-入口优选域名大部分被墙。用 bestcf 重新测速，把 `EDGE_HOSTS` 换成实测能通的域名。
+入口优选域名大部分不通。用 bestcf 重新测速，把 `EDGE_HOSTS` 换成实测能通的域名。
 
-### 全部 -1
-检查：edgetunnel 是否部署好、域名是否解析到 Cloudflare、UUID 是否填对、传输协议是否对得上。
+### 所有节点都连不上
+- 订阅地址里的 UUID 是否和 gate-worker 的 `UUID` 一致
+- gate-worker 的 `NODES_URL` 是否能在浏览器打开
+- 先在浏览器打开订阅地址，能看到一串 base64 文本说明 Worker 正常
+- 在 Cloudflare 控制台 → gate-worker → **日志** 查看具体报错（如 `UUID 不匹配`、`TCP handshake through SSTP timed out`）
 
-### 30 分钟没更新
-到 Actions 页看最近一次运行是否成功。GitHub 定时任务本身会延迟几分钟到半小时，属正常现象；另外公开仓库 60 天没有任何提交时，GitHub 会自动暂停定时任务，需要到 Actions 页重新启用 workflow。
+### 节点没有更新
+到 Actions 页看最近一次运行是否成功。GitHub 定时任务本身会延迟几分钟到半小时，属正常现象。公开仓库 60 天没有任何提交时，GitHub 会自动暂停定时任务，需要到 Actions 页重新启用。
 
 ### 检测 Worker 报错
-确认 Worker 部署成功、域名填对（仓库 Secret `CHECK_WORKER`），浏览器直接访问 `https://你的Worker/check?sstp=...` 看是否返回 JSON。
-
-### 不知道 UUID 和节点域名在哪里看
-登录 edgetunnel 后台（`https://你的域名/admin`），在后台首页就能看到。
+确认检测 Worker 部署成功、仓库 Secret `CHECK_WORKER` 填对，浏览器直接访问 `https://你的检测Worker/check?sstp=...` 看是否返回 JSON。
 
 ---
 
-*流水线：GitHub Actions（每 30 分钟 cron） → vpngate.py → 检测 Worker → GitHub Pages*
+## 致谢
 
----
+| 项目 | 用途 |
+| :--- | :--- |
+| [VPN Gate](https://www.vpngate.net/) | SSTP 节点数据源 |
+| [lsh8848/cm-Workers-CheckSocks5](https://github.com/lsh8848/cm-Workers-CheckSocks5) | 检测 Worker：验证 SSTP 节点可用性并读取出口 IP |
+| [fdciabdul/Vpngate-Scraper-API](https://github.com/fdciabdul/Vpngate-Scraper-API) | VPN Gate 节点数据的 GitHub 镜像（官方源失效时回退） |
+| [cmliu/edgetunnel](https://github.com/cmliu/edgetunnel) | gate-worker 的 SSTP 握手代码改编自此项目 |
 
-## 引用与致谢
+## 许可证
 
-本项目的实现离不开以下开源项目和服务的支持，在此表示衷心的感谢：
-
-| 项目 | 用途 | 链接 |
-| :--- | :--- | :--- |
-| **cmliu/edgetunnel** | VLESS 代理 + 链式代理，节点最终通过它使用 | https://github.com/cmliu/edgetunnel |
-| **lsh8848/cm-Workers-CheckSocks5** | 检测 Worker：验证 SSTP 节点可用性并读取出口 IP | https://github.com/lsh8848/cm-Workers-CheckSocks5 |
-| **fdciabdul/Vpngate-Scraper-API** | VPN Gate 节点数据的 GitHub 镜像（官方源失效时回退） | https://github.com/fdciabdul/Vpngate-Scraper-API |
-| **VPN Gate** | SSTP 节点数据源 | https://www.vpngate.net/ |
-| **Star History** | 提供项目热度曲线图生成服务 | https://star-history.com/ |
-
----
-
-## 项目热度
-
-[![Star History Chart](https://api.star-history.com/svg?repos=hezhanleiok/gate&type=Date)](https://star-history.com/#hezhanleiok/gate&Date)
-
----
-
-**特别感谢**：
-感谢所有为开源社区做出贡献的开发者们！没有你们的无私奉献，就没有这个项目的诞生。也感谢每一位使用、测试和反馈问题的用户，是你们的支持让这个项目不断完善。
+`worker/` 目录以 [GPL-2.0](./worker/LICENSE) 发布。
