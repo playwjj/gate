@@ -2,6 +2,9 @@ name: VPN Gate Node Check
 
 on:
   workflow_dispatch:
+  schedule:
+    # 每 30 分钟运行一次 (UTC, 避开整点高峰; GitHub 定时任务可能延迟几分钟到半小时)
+    - cron: "17,47 * * * *"
 
 permissions:
   contents: read

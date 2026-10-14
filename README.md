@@ -159,7 +159,7 @@ vpngate.py：
 检查：edgetunnel 是否部署好、域名是否解析到 Cloudflare、UUID 是否填对、传输协议是否对得上。
 
 ### 30 分钟没更新
-到 Actions 页看最近一次运行是否成功、cron 是否还在。
+到 Actions 页看最近一次运行是否成功。GitHub 定时任务本身会延迟几分钟到半小时，属正常现象；另外公开仓库 60 天没有任何提交时，GitHub 会自动暂停定时任务，需要到 Actions 页重新启用 workflow。
 
 ### 检测 Worker 报错
 确认 Worker 部署成功、域名填对（仓库 Secret `CHECK_WORKER`），浏览器直接访问 `https://你的Worker/check?sstp=...` 看是否返回 JSON。
