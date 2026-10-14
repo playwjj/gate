@@ -29,6 +29,7 @@ SUB_FILE = "/var/lib/gate/sub.txt"
 WS_PATH = "/ws"
 PROBE_URL = "http://cp.cloudflare.com/generate_204"
 BAD_NODE_TTL = 3600  # 连接失败的节点 1 小时内不再尝试
+ENTRY_CHECK_TTL = 3600  # 优选入口每小时重新验证一次
 CONNECT_WAIT = 30
 
 
@@ -57,13 +58,20 @@ def slot_uuid(master, k):
 # 节点
 # ---------------------------------------------------------------------------
 NODE_RE = re.compile(r"#([^$]+)\$sstp://(?:([^:@]+):([^@]*)@)?([^:\s]+):(\d+)")
+ENTRY_RE = re.compile(r"^([^#\s:]+|\[[0-9a-fA-F:]+\])(?::(\d+))?#")
 
 
 def fetch_nodes(url):
+    """返回 (节点列表, 优选入口列表); 入口是 nodes.txt 每行开头的 域名/IP:端口"""
     with urllib.request.urlopen(url, timeout=30) as resp:
         text = resp.read().decode("utf-8", "replace")
-    nodes = []
+    nodes, entries = [], []
     for line in text.splitlines():
+        e = ENTRY_RE.match(line.strip())
+        if e:
+            entry = f"{e.group(1)}:{e.group(2) or '443'}"
+            if entry not in entries:
+                entries.append(entry)
         m = NODE_RE.search(line)
         if m:
             name, user, password, host, port = m.groups()
@@ -73,7 +81,35 @@ def fetch_nodes(url):
                 "user": user or "vpn",
                 "password": password or "vpn",
             })
-    return nodes
+    return nodes, entries
+
+
+def entry_works(cfg, entry):
+    """通过该入口连接 Cloudflare 并请求 HOST 的订阅, 能拿到 200 才说明这个入口可用"""
+    host, port = entry.rsplit(":", 1)
+    result = subprocess.run(
+        ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "8",
+         "--connect-to", f"{cfg['HOST']}:443:{host.strip('[]')}:{port}",
+         f"https://{cfg['HOST']}/sub/{cfg['UUID']}"],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() == "200"
+
+
+def refresh_entries(cfg, state, candidates):
+    """GATE_ENTRIES 手动指定时直接用; 否则从 nodes.txt 的入口里验证出可用的, 每小时重新验证"""
+    if cfg.get("ENTRIES"):
+        state["entries"] = {"checked": int(time.time()), "list": [e.strip() for e in cfg["ENTRIES"].split(",") if e.strip()]}
+        return
+    cached = state.get("entries") or {}
+    if cached.get("list") and time.time() - cached.get("checked", 0) < ENTRY_CHECK_TTL:
+        return
+    if not candidates:
+        return
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        ok = [e for e, good in zip(candidates, pool.map(lambda e: entry_works(cfg, e), candidates)) if good]
+    log(f"优选入口: {len(ok)}/{len(candidates)} 可用")
+    state["entries"] = {"checked": int(time.time()), "list": ok}
 
 
 def order_candidates(nodes):
@@ -166,6 +202,13 @@ def sync(cfg):
             else:
                 seen_ips[ip] = k
 
+    try:
+        all_nodes, entry_candidates = fetch_nodes(cfg["NODES_URL"])
+    except Exception as e:
+        log(f"拉取 nodes.txt 失败: {e}")
+        all_nodes, entry_candidates = [], []
+    refresh_entries(cfg, state, entry_candidates)
+
     broken = [k for k in slots if not health[k]]
     for k in slots:
         if health[k]:
@@ -177,11 +220,7 @@ def sync(cfg):
         stop_slot(k)
 
     if broken:
-        try:
-            nodes = order_candidates(fetch_nodes(cfg["NODES_URL"]))
-        except Exception as e:
-            log(f"拉取 nodes.txt 失败: {e}")
-            nodes = []
+        nodes = order_candidates(all_nodes)
         in_use = {s["node"] for s in state["slots"].values()}
         queue = [n for n in nodes if n["node"] not in in_use and n["node"] not in state["bad"]]
         lock = threading.Lock()
@@ -212,6 +251,8 @@ def sync(cfg):
 
 def write_subscription(cfg, state):
     host = cfg["HOST"]
+    # 每个槽位轮流用一个优选入口作为连接地址, host/sni 仍是 HOST; 没有可用入口时直接连 HOST
+    entries = (state.get("entries") or {}).get("list") or [f"{host}:443"]
     links = []
     for k in range(1, cfg["SLOTS"] + 1):
         slot = state["slots"].get(str(k))
@@ -220,7 +261,8 @@ def write_subscription(cfg, state):
             "encryption": "none", "security": "tls", "sni": host, "fp": "chrome",
             "type": "ws", "host": host, "path": WS_PATH,
         })
-        links.append(f"vless://{slot_uuid(cfg['UUID'], k)}@{host}:443?{params}#{urllib.parse.quote(remark)}")
+        address = entries[(k - 1) % len(entries)]
+        links.append(f"vless://{slot_uuid(cfg['UUID'], k)}@{address}?{params}#{urllib.parse.quote(remark)}")
     os.makedirs(os.path.dirname(SUB_FILE), exist_ok=True)
     tmp = SUB_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -235,6 +277,8 @@ def status(cfg):
         ip = ppp_ip(k)
         desc = f"{slot['name']} {slot['node']}" if slot else "-"
         print(f"slot{k}  ppp{k}={ip or 'down':<15} {desc}")
+    entries = state.get("entries") or {}
+    print(f"优选入口 ({len(entries.get('list', []))}): {', '.join(entries.get('list', [])) or '-'}")
 
 
 # ---------------------------------------------------------------------------

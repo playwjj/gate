@@ -27,7 +27,7 @@ VPN Gate 官方源
       │
       ▼
 VPS（本仓库 vps/ 目录）
-      │  gate-manager 每 3 分钟检查 N 个槽位，失效的从 nodes.txt 换新节点
+      │  gate-manager 每分钟检查 N 个槽位，失效的从 nodes.txt 换新节点
       │  每个槽位 = 一条 SSTP 隧道（pppK）= 订阅里的一个节点
       ▼
 客户端订阅 → 使用 VPN Gate 家宽节点
@@ -99,7 +99,7 @@ GATE_UUID=$(cat /proc/sys/kernel/random/uuid)   # 主 UUID，记下来，订阅�
 GATE_UUID=$GATE_UUID GATE_HOST=gate.你的域名 bash vps/install.sh
 ~~~
 
-脚本会安装 sstp-client、xray（固定版本并校验 SHA256）、nginx，建立 8 个 SSTP 槽位，并启动每 3 分钟一次的 gate-manager 定时任务。可选环境变量见 `install.sh` 开头的注释（槽位数 `GATE_SLOTS`、nginx 端口 `GATE_PORT` 等）。
+脚本会安装 sstp-client、xray（固定版本并校验 SHA256）、nginx，建立 8 个 SSTP 槽位，并启动每分钟一次的 gate-manager 定时任务。可选环境变量见 `install.sh` 开头的注释（槽位数 `GATE_SLOTS`、nginx 端口 `GATE_PORT` 等）。
 
 > 安装脚本使用 `nodefaultroute`，不会修改 VPS 的默认路由，SSH 不受影响。
 
@@ -127,7 +127,7 @@ Zero Trust → 网络 → Tunnels → 你的隧道 → **已发布应用程序�
 https://gate.你的域名/sub/你的GATE_UUID
 ~~~
 
-订阅里有 8 个节点（`01-韩国-住宅` 这样命名）。每个节点固定对应一个槽位：槽位背后的 VPN Gate 节点失效时会自动换新，客户端配置不用改；刷新订阅只是更新节点名称里的国家。
+订阅里有 8 个节点（`01-韩国-住宅` 这样命名），连接地址是轮流分配的 Cloudflare 优选入口，`host`/`sni` 是 `GATE_HOST`。每个节点固定对应一个槽位：槽位背后的 VPN Gate 节点失效时会自动换新，客户端配置不用改；刷新订阅只是更新节点名称里的国家。
 
 > GATE_UUID 就是访问凭证，不要公开分享订阅链接。
 
@@ -155,6 +155,7 @@ https://gate.你的域名/sub/你的GATE_UUID
 | `GATE_SLOTS` | 槽位数（同时保持的 SSTP 隧道数），默认 8 |
 | `GATE_LISTEN` / `GATE_PORT` | nginx 监听地址和端口，默认 docker0 地址 / 18080 |
 | `GATE_NODES_URL` | nodes.txt 地址，默认本仓库的 GitHub Pages |
+| `GATE_ENTRIES` | 订阅里的连接地址（Cloudflare 优选域名/IP，逗号分隔）；默认从 nodes.txt 的入口里自动验证挑选，每小时重新验证 |
 
 **vpngate.py**（一般不用改，也可以用同名环境变量覆盖）：
 
@@ -174,7 +175,7 @@ https://gate.你的域名/sub/你的GATE_UUID
 - SSTP 隧道由 Linux 内核的 PPP 承载，TCP/UDP 都支持；目标只支持 IPv4（VPN Gate 只分配 IPv4）
 - 速度主要取决于 VPN Gate 节点本身的带宽，各节点差别很大，同一节点不同时段也不同
 - 没有匹配到槽位的流量会被丢弃，不会从 VPS 自己的 IP 出去
-- VPN Gate 是志愿者节点，随时可能下线；gate-manager 最多 3 分钟内会把失效槽位换成新节点
+- VPN Gate 是志愿者节点，随时可能下线；gate-manager 约 1 分钟内会把失效槽位换成新节点
 
 ---
 
@@ -186,7 +187,7 @@ https://gate.你的域名/sub/你的GATE_UUID
 - 查看日志：`journalctl -u gate-manager -n 50`、`journalctl -u gate-xray -n 50`
 
 ### 某个节点连不上
-对应槽位背后的 VPN Gate 节点可能刚失效，等最多 3 分钟 gate-manager 会自动换新；也可以在 VPS 上手动运行 `gate-manager sync`。
+对应槽位背后的 VPN Gate 节点可能刚失效，等约 1 分钟 gate-manager 会自动换新；也可以在 VPS 上手动运行 `gate-manager sync`。
 
 ### 节点没有更新
 到 Actions 页看最近一次运行是否成功。GitHub 定时任务本身会延迟几分钟到半小时，属正常现象。公开仓库 60 天没有任何提交时，GitHub 会自动暂停定时任务，需要到 Actions 页重新启用。

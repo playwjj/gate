@@ -11,6 +11,8 @@
 #   GATE_NODES_URL  nodes.txt 地址, 默认 https://playwjj.github.io/gate/nodes.txt
 #   GATE_LISTEN     nginx 监听地址, 默认 docker0 的地址 (供容器里的 cloudflared 访问), 没有 docker0 时用 127.0.0.1
 #   GATE_PORT       nginx 监听端口, 默认 18080
+#   GATE_ENTRIES    订阅里的连接地址 (Cloudflare 优选域名/IP, 逗号分隔, 如 a.com:443,1.2.3.4:443);
+#                   默认从 nodes.txt 的入口里自动验证挑选
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -66,6 +68,7 @@ SLOTS=$GATE_SLOTS
 NODES_URL=$GATE_NODES_URL
 LISTEN=$GATE_LISTEN
 PORT=$GATE_PORT
+ENTRIES=${GATE_ENTRIES:-}
 EOF
 chmod 600 /etc/gate/gate.env
 
@@ -94,11 +97,11 @@ EOF
 
 cat > /etc/systemd/system/gate-manager.timer <<'EOF'
 [Unit]
-Description=gate slot manager (every 3 minutes)
+Description=gate slot manager (every minute)
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=3min
+OnUnitActiveSec=1min
 
 [Install]
 WantedBy=timers.target
