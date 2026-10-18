@@ -4,18 +4,20 @@ gate-manager: 在 VPS 上维护 N 个 SSTP 槽位 (ppp1..pppN), 并生成 xray /
 
 用法:
   gate-manager sync           检查各槽位, 坏掉的从 nodes.txt 换新节点, 更新订阅 (systemd timer 定时调用)
+  gate-manager run            容器模式: 没有 systemd, 由本进程直接管理 sstpc, 每分钟 sync 一次
   gate-manager status         打印各槽位状态
   gate-manager xray-config    输出 xray 配置 JSON
   gate-manager nginx-config   输出 nginx 站点配置
   gate-manager warp-register  注册 Cloudflare WARP 设备, 生成 WARP 槽位用的 WireGuard 配置 (已有则跳过)
 
-配置读取 /etc/gate/gate.env (由 install.sh 生成)
+配置读取 /etc/gate/gate.env (由 install.sh 或容器入口脚本生成)
 """
 import base64
 import datetime
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -35,6 +37,12 @@ WS_PATH = "/ws"
 PROBE_URL = "http://cp.cloudflare.com/generate_204"
 BAD_NODE_TTL = 3600  # 连接失败的节点 1 小时内不再尝试
 CONNECT_WAIT = 30
+SYNC_INTERVAL = 60
+LOG_DIR = "/var/log/gate"
+
+# run 模式下 sstpc 是本进程的子进程, 不经过 systemd 的 gate-slot@ 单元
+INLINE = False
+SSTPC = {}
 
 
 def log(msg):
@@ -127,9 +135,27 @@ def x25519_public_key(private):
     return (x2 * pow(z2, p - 2, p) % p).to_bytes(32, "little")
 
 
+def warp_import(b64):
+    """复用已有的 WARP 设备 (GATE_WARP_B64 = base64 的 warp.json), 成功返回 True"""
+    try:
+        warp = json.loads(base64.b64decode(b64))
+        for key in ("private_key", "peer_public_key", "endpoint", "address", "reserved"):
+            warp[key]
+    except (ValueError, KeyError, TypeError):
+        log("GATE_WARP_B64 无法解析, 改为注册新的 WARP 设备")
+        return False
+    fd = os.open(WARP_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(warp, f, indent=1)
+    log("复用 GATE_WARP_B64 中的 WARP 设备")
+    return True
+
+
 def warp_register():
     if os.path.exists(WARP_FILE):
         log(f"WARP 已注册 ({WARP_FILE}), 跳过")
+        return
+    if os.environ.get("GATE_WARP_B64") and warp_import(os.environ["GATE_WARP_B64"]):
         return
     private = bytearray(os.urandom(32))
     private[0] &= 248
@@ -191,13 +217,46 @@ def slot_healthy(k):
 
 
 def stop_slot(k):
-    subprocess.run(["systemctl", "stop", f"gate-slot@{k}"], capture_output=True)
+    if not INLINE:
+        subprocess.run(["systemctl", "stop", f"gate-slot@{k}"], capture_output=True)
+        return
+    proc = SSTPC.pop(k, None)
+    if proc:
+        # sstpc 在自己的进程组里, 连同它拉起的 pppd 一起结束
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(10)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+        except ProcessLookupError:
+            proc.wait()
+    # pppd 可能脱离了 sstpc 的进程组, 按 pid 文件补刀, 否则 pppK 一直被占用
+    try:
+        with open(f"/var/run/ppp{k}.pid", encoding="utf-8") as f:
+            pid = int(f.read().split()[0])
+        with open(f"/proc/{pid}/comm", encoding="utf-8") as f:
+            if f.read().strip() == "pppd":
+                os.kill(pid, signal.SIGTERM)
+    except (OSError, ValueError, IndexError):
+        pass
 
 
 def start_slot(k, node):
-    with open(f"/etc/gate/slot-{k}.env", "w", encoding="utf-8") as f:
-        f.write(f"NODE={node['node']}\nSSTP_USER={node['user']}\nSSTP_PASS={node['password']}\n")
-    subprocess.run(["systemctl", "restart", f"gate-slot@{k}"], capture_output=True)
+    if INLINE:
+        stop_slot(k)
+        # 参数和 install.sh 里 gate-slot@.service 的 ExecStart 保持一致
+        with open(f"{LOG_DIR}/slot-{k}.log", "w", encoding="utf-8") as logf:
+            SSTPC[k] = subprocess.Popen(
+                ["sstpc", "--log-stderr", "--cert-warn", "--tls-ext", "--user", node["user"],
+                 "--password", node["password"], node["node"], "noauth", "nodefaultroute",
+                 "noipdefault", "nodetach", "unit", str(k), "refuse-eap"],
+                stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+    else:
+        with open(f"/etc/gate/slot-{k}.env", "w", encoding="utf-8") as f:
+            f.write(f"NODE={node['node']}\nSSTP_USER={node['user']}\nSSTP_PASS={node['password']}\n")
+        subprocess.run(["systemctl", "restart", f"gate-slot@{k}"], capture_output=True)
     deadline = time.time() + CONNECT_WAIT
     while time.time() < deadline:
         if ppp_ip(k):
@@ -228,7 +287,8 @@ def sync(cfg):
     state["bad"] = {n: t for n, t in state.get("bad", {}).items() if now - t < BAD_NODE_TTL}
     slots = range(1, cfg["SLOTS"] + 1)
 
-    with ThreadPoolExecutor(max_workers=cfg["SLOTS"]) as pool:
+    # SLOTS=0 (没有 /dev/ppp 的平台) 时只有 WARP 槽位
+    with ThreadPoolExecutor(max_workers=max(cfg["SLOTS"], 1)) as pool:
         health = dict(zip(slots, pool.map(slot_healthy, slots)))
 
     # VPN Gate 各服务器独立分配 10.211.x.x, 不同槽位偶尔会拿到相同 IP, 重复的视为不健康
@@ -307,6 +367,26 @@ def write_subscription(cfg, state):
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(base64.b64encode("\n".join(links).encode()).decode())
     os.replace(tmp, SUB_FILE)
+
+
+def run(cfg):
+    global INLINE
+    INLINE = True
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+    def shutdown(*_):
+        for k in list(SSTPC):
+            stop_slot(k)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+    while True:
+        try:
+            sync(cfg)
+        except Exception as e:
+            log(f"sync 出错: {e}")
+        time.sleep(SYNC_INTERVAL)
 
 
 def status(cfg):
@@ -400,6 +480,8 @@ def main():
     cfg = load_config()
     if cmd == "sync":
         sync(cfg)
+    elif cmd == "run":
+        run(cfg)
     elif cmd == "status":
         status(cfg)
     elif cmd == "xray-config":

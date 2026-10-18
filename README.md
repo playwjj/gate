@@ -138,6 +138,24 @@ https://gate.你的域名/sub/你的GATE_UUID
 
 如果 VPS 会定期重建，可以在部署流程里检出本仓库，把 `vps/` 复制上去后执行 `install.sh`，`GATE_UUID` 放在 CI 的 Secret 里。
 
+### Docker 部署（可替代第 5、6 步）
+
+镜像 [`passport888/gate-tunnel`](https://hub.docker.com/r/passport888/gate-tunnel) 在 [work-tunnel-vless](https://github.com/playwjj/work-tunnel-vless)（node VLESS + cloudflared）的基础上附加了本仓库的 VPS 部分，一个容器里同时跑两套服务，cloudflared 也在容器内，不需要在宿主机另外安装。
+
+~~~bash
+docker run -d --name gate-tunnel --restart unless-stopped \
+  --device /dev/ppp --cap-add NET_ADMIN \
+  -e UUID=<uuid> -e TUNNEL_DOMAIN=vless.你的域名 -e TUNNEL_TOKEN=<Tunnel Token> \
+  -e GATE_HOST=gate.你的域名 -e GATE_WARP_B64=<可选> \
+  passport888/gate-tunnel
+~~~
+
+- `--device /dev/ppp --cap-add NET_ADMIN` 只在能跑 PPP 的 KVM 主机上加（宿主机需已加载 `ppp_generic`：`modprobe ppp_generic`）。没有 `/dev/ppp` 时（Northflank 等托管容器平台），SSTP 槽位自动关闭，订阅里只有 WARP 节点；也可以用 `GATE_SLOTS=0` 主动关闭。
+- `GATE_UUID` 默认等于 `UUID`，其余 `GATE_*` 变量含义与 `install.sh` 相同，见 [`docker/entrypoint.sh`](./docker/entrypoint.sh) 开头的注释。
+- 同一个 Tunnel 里配两条 Public Hostname，都指向容器内部：`vless.你的域名` → `http://localhost:3000`（work-tunnel-vless），`gate.你的域名` → `http://localhost:18080`（gate）。
+- 容器重建会重新注册 WARP 设备。注册后执行 `docker exec gate-tunnel base64 -w0 /etc/gate/warp.json`，把结果设为 `GATE_WARP_B64` 即可复用。
+- 订阅地址同第 7 步：`https://gate.你的域名/sub/<GATE_UUID>`。
+
 ---
 
 ## 配置速查表
