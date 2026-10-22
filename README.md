@@ -180,6 +180,7 @@ docker run -d --name gate-tunnel --restart unless-stopped \
 | `GATE_LISTEN` / `GATE_PORT` | nginx 监听地址和端口，默认 docker0 地址 / 18080 |
 | `GATE_NODES_URL` | nodes.txt 地址，默认本仓库的 GitHub Pages |
 | `GATE_WARP` | `1`（默认）注册 WARP 并在订阅里加一个 `WARP` 节点；`0` 关闭 |
+| `GATE_NODE_SEED` | 可选，任意字符串；按它打乱选节点的顺序（住宅优先不变）。部署多台时各设不同的值（如 `a`、`b`），各台会优先连不同的 VPN Gate 节点；不设时所有机器按同一顺序选，节点基本重复 |
 | `GATE_WARP_B64` | 已有 `/etc/gate/warp.json` 的 base64；设置后复用该 WARP 设备，不再注册新设备 |
 
 **vpngate.py**（一般不用改，也可以用同名环境变量覆盖）：

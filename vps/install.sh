@@ -12,6 +12,7 @@
 #   GATE_LISTEN     nginx 监听地址, 默认 docker0 的地址 (供容器里的 cloudflared 访问), 没有 docker0 时用 127.0.0.1
 #   GATE_PORT       nginx 监听端口, 默认 18080
 #   GATE_WARP       1 (默认) 时注册 Cloudflare WARP 并在订阅里多一个 WARP 节点, 0 关闭
+#   GATE_NODE_SEED  任意字符串, 按它打乱选节点的顺序; 多台机器各设不同的值, 就会优先连不同的 VPN Gate 节点
 #   GATE_WARP_B64   已有的 /etc/gate/warp.json 的 base64; 设置后复用这个 WARP 设备, 不再注册新设备
 #                   (VPS 定期重建时建议设置, 获取方法: base64 -w0 /etc/gate/warp.json)
 set -euo pipefail
@@ -71,6 +72,7 @@ NODES_URL=$GATE_NODES_URL
 LISTEN=$GATE_LISTEN
 PORT=$GATE_PORT
 WARP=$GATE_WARP
+NODE_SEED=${GATE_NODE_SEED:-}
 EOF
 chmod 600 /etc/gate/gate.env
 

@@ -11,6 +11,7 @@
 #   GATE_NODES_URL  nodes.txt 地址, 默认 https://playwjj.github.io/gate/nodes.txt
 #   GATE_PORT       nginx 端口, 默认 18080 (只监听 127.0.0.1, 由容器内的 cloudflared 访问)
 #   GATE_WARP       1 (默认) 启用 WARP 槽位, 0 关闭
+#   GATE_NODE_SEED  任意字符串, 按它打乱选节点的顺序; 多台机器各设不同的值, 就会优先连不同的 VPN Gate 节点
 #   GATE_WARP_B64   已有的 /etc/gate/warp.json 的 base64, 复用同一个 WARP 设备 (容器重建时建议设置)
 set -eu
 
@@ -41,6 +42,7 @@ LISTEN=127.0.0.1
 PORT=$GATE_PORT
 WARP=$GATE_WARP
 SSTP_MODE=$GATE_SSTP_MODE
+NODE_SEED=${GATE_NODE_SEED:-}
 ENV
 )
 

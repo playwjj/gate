@@ -21,6 +21,7 @@ import base64
 import datetime
 import json
 import os
+import random
 import re
 import signal
 import subprocess
@@ -102,12 +103,22 @@ def fetch_nodes(url):
     return nodes
 
 
-def order_candidates(nodes):
-    """住宅优先, 各国家轮流取, 让槽位尽量覆盖不同国家"""
+def order_candidates(nodes, seed=""):
+    """住宅优先, 各国家轮流取, 让槽位尽量覆盖不同国家
+
+    seed 非空时按它打乱国家顺序和各国家内的节点顺序 (同一个 seed 结果固定),
+    多台机器设不同的 GATE_NODE_SEED 就会优先连不同的节点
+    """
+    rng = random.Random(seed) if seed else None
+
     def interleave(items):
         buckets = {}
         for n in items:
             buckets.setdefault(n["name"].split("-")[0], []).append(n)
+        if rng:
+            buckets = dict(rng.sample(list(buckets.items()), len(buckets)))
+            for bucket in buckets.values():
+                rng.shuffle(bucket)
         out = []
         while any(buckets.values()):
             for country in list(buckets):
@@ -376,7 +387,7 @@ def sync(cfg):
         stop_slot(k)
 
     if broken:
-        nodes = order_candidates(all_nodes)
+        nodes = order_candidates(all_nodes, cfg.get("NODE_SEED", ""))
         in_use = {s["node"] for s in state["slots"].values()}
         queue = [n for n in nodes if n["node"] not in in_use and n["node"] not in state["bad"]]
         lock = threading.Lock()
