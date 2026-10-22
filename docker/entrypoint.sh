@@ -4,7 +4,10 @@
 # 环境变量 (原镜像的 UUID / PORT / TUNNEL_DOMAIN / TUNNEL_TOKEN 等照旧):
 #   GATE_HOST       必填, gate 的域名 (Tunnel 里另加一个 Public Hostname → http://localhost:$GATE_PORT)
 #   GATE_UUID       主 UUID, 默认等于 UUID (各槽位 UUID 由它派生, 也是订阅路径)
-#   GATE_SLOTS      SSTP 槽位数, 默认 8; 0 = 关闭 SSTP 只留 WARP. 没有 /dev/ppp 时自动变成 0
+#   GATE_SLOTS      SSTP 槽位数, 默认 8; 0 = 关闭 SSTP 只留 WARP
+#   GATE_SSTP_MODE  auto (默认): 有 /dev/ppp 用 ppp, 否则用 socks
+#                   ppp   = sstpc + pppd 内核隧道 (需要 --device /dev/ppp --cap-add NET_ADMIN)
+#                   socks = 用户态 sstp-socks, 不需要任何特权 (Northflank 等托管容器平台)
 #   GATE_NODES_URL  nodes.txt 地址, 默认 https://playwjj.github.io/gate/nodes.txt
 #   GATE_PORT       nginx 端口, 默认 18080 (只监听 127.0.0.1, 由容器内的 cloudflared 访问)
 #   GATE_WARP       1 (默认) 启用 WARP 槽位, 0 关闭
@@ -18,11 +21,15 @@ GATE_SLOTS="${GATE_SLOTS:-8}"
 GATE_NODES_URL="${GATE_NODES_URL:-https://playwjj.github.io/gate/nodes.txt}"
 GATE_PORT="${GATE_PORT:-18080}"
 GATE_WARP="${GATE_WARP:-1}"
+GATE_SSTP_MODE="${GATE_SSTP_MODE:-auto}"
 
-if [ "$GATE_SLOTS" -gt 0 ] && [ ! -c /dev/ppp ]; then
-  echo "[gate] 没有 /dev/ppp (KVM 上需要 --device /dev/ppp --cap-add NET_ADMIN), 关闭 SSTP 槽位, 只提供 WARP"
-  GATE_SLOTS=0
+if [ "$GATE_SSTP_MODE" = auto ]; then
+  if [ -c /dev/ppp ]; then GATE_SSTP_MODE=ppp; else GATE_SSTP_MODE=socks; fi
 fi
+case "$GATE_SSTP_MODE" in
+  ppp|socks) echo "[gate] SSTP 槽位模式: $GATE_SSTP_MODE" ;;
+  *) echo "[gate] GATE_SSTP_MODE 只能是 auto / ppp / socks"; exit 1 ;;
+esac
 
 mkdir -p /etc/gate /var/lib/gate /var/log/gate /usr/local/etc/xray
 (umask 077; cat > /etc/gate/gate.env <<ENV
@@ -33,6 +40,7 @@ NODES_URL=$GATE_NODES_URL
 LISTEN=127.0.0.1
 PORT=$GATE_PORT
 WARP=$GATE_WARP
+SSTP_MODE=$GATE_SSTP_MODE
 ENV
 )
 

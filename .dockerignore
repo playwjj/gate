@@ -1,3 +1,6 @@
 *
 !vps/gate-manager.py
 !docker/entrypoint.sh
+!sstp/go.mod
+!sstp/go.sum
+!sstp/*.go

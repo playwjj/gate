@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-gate-manager: 在 VPS 上维护 N 个 SSTP 槽位 (ppp1..pppN), 并生成 xray / nginx 配置和订阅
+gate-manager: 在 VPS 上维护 N 个 SSTP 槽位, 并生成 xray / nginx 配置和订阅
+
+槽位有两种实现 (gate.env 里的 SSTP_MODE):
+  ppp    sstpc + pppd, 每个槽位一个内核网卡 pppK, xray 绑定网卡出站 (需要 /dev/ppp 和 NET_ADMIN)
+  socks  sstp-socks (用户态 SSTP + gVisor 网络栈), 每个槽位一个本地 SOCKS5 端口 SOCKS_BASE+K,
+         xray 经 SOCKS5 出站; 不需要任何特权, 只支持 run 模式 (容器)
 
 用法:
   gate-manager sync           检查各槽位, 坏掉的从 nodes.txt 换新节点, 更新订阅 (systemd timer 定时调用)
@@ -40,9 +45,11 @@ CONNECT_WAIT = 30
 SYNC_INTERVAL = 60
 LOG_DIR = "/var/log/gate"
 
-# run 模式下 sstpc 是本进程的子进程, 不经过 systemd 的 gate-slot@ 单元
+# run 模式下 sstpc / sstp-socks 是本进程的子进程, 不经过 systemd 的 gate-slot@ 单元
 INLINE = False
 SSTPC = {}
+SOCKS_MODE = False
+SOCKS_BASE = 21080
 
 
 def log(msg):
@@ -60,6 +67,10 @@ def load_config():
     cfg["SLOTS"] = int(cfg.get("SLOTS", "8"))
     cfg["XRAY_PORT"] = int(cfg.get("XRAY_PORT", "10086"))
     cfg["WARP"] = cfg.get("WARP", "1") == "1"
+    cfg["SSTP_MODE"] = cfg.get("SSTP_MODE", "ppp")
+    cfg["SOCKS_BASE"] = int(cfg.get("SOCKS_BASE", "21080"))
+    global SOCKS_MODE, SOCKS_BASE
+    SOCKS_MODE, SOCKS_BASE = cfg["SSTP_MODE"] == "socks", cfg["SOCKS_BASE"]
     return cfg
 
 
@@ -198,6 +209,26 @@ def load_warp(cfg):
 # ---------------------------------------------------------------------------
 # 槽位
 # ---------------------------------------------------------------------------
+def socks_status_file(k):
+    return f"/var/lib/gate/slot-{k}.json"
+
+
+def slot_ip(k):
+    """槽位拿到的 VPN Gate 内网 IP, 隧道没建立时返回 None"""
+    if not SOCKS_MODE:
+        return ppp_ip(k)
+    # sstp-socks 连接成功后写状态文件, 退出时删除; 进程被 kill -9 时文件会残留, 所以还要看进程在不在
+    try:
+        with open(socks_status_file(k), encoding="utf-8") as f:
+            st = json.load(f)
+        os.kill(st["pid"], 0)
+        if INLINE and (k not in SSTPC or SSTPC[k].poll() is not None):
+            return None
+        return st["ip"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def ppp_ip(k):
     out = subprocess.run(["ip", "-4", "-o", "addr", "show", f"ppp{k}"], capture_output=True, text=True).stdout
     m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", out)
@@ -205,15 +236,16 @@ def ppp_ip(k):
 
 
 def probe(k):
+    via = ["--socks5-hostname", f"127.0.0.1:{SOCKS_BASE + k}"] if SOCKS_MODE else ["--interface", f"ppp{k}"]
     result = subprocess.run(
-        ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "10", "--interface", f"ppp{k}", PROBE_URL],
+        ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "10", *via, PROBE_URL],
         capture_output=True, text=True,
     )
     return result.stdout.strip() == "204"
 
 
 def slot_healthy(k):
-    return ppp_ip(k) is not None and probe(k)
+    return slot_ip(k) is not None and probe(k)
 
 
 def stop_slot(k):
@@ -231,6 +263,12 @@ def stop_slot(k):
             proc.wait()
         except ProcessLookupError:
             proc.wait()
+    if SOCKS_MODE:
+        try:
+            os.remove(socks_status_file(k))
+        except OSError:
+            pass
+        return
     # pppd 可能脱离了 sstpc 的进程组, 按 pid 文件补刀, 否则 pppK 一直被占用
     try:
         with open(f"/var/run/ppp{k}.pid", encoding="utf-8") as f:
@@ -245,13 +283,18 @@ def stop_slot(k):
 def start_slot(k, node):
     if INLINE:
         stop_slot(k)
-        # 参数和 install.sh 里 gate-slot@.service 的 ExecStart 保持一致
+        if SOCKS_MODE:
+            cmd = ["sstp-socks", "-server", node["node"], "-user", node["user"], "-pass", node["password"],
+                   "-listen", f"127.0.0.1:{SOCKS_BASE + k}", "-status", socks_status_file(k),
+                   "-timeout", f"{CONNECT_WAIT}s"]
+        else:
+            # 参数和 install.sh 里 gate-slot@.service 的 ExecStart 保持一致
+            cmd = ["sstpc", "--log-stderr", "--cert-warn", "--tls-ext", "--user", node["user"],
+                   "--password", node["password"], node["node"], "noauth", "nodefaultroute",
+                   "noipdefault", "nodetach", "unit", str(k), "refuse-eap"]
         with open(f"{LOG_DIR}/slot-{k}.log", "w", encoding="utf-8") as logf:
             SSTPC[k] = subprocess.Popen(
-                ["sstpc", "--log-stderr", "--cert-warn", "--tls-ext", "--user", node["user"],
-                 "--password", node["password"], node["node"], "noauth", "nodefaultroute",
-                 "noipdefault", "nodetach", "unit", str(k), "refuse-eap"],
-                stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True,
+                cmd, stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True,
             )
     else:
         with open(f"/etc/gate/slot-{k}.env", "w", encoding="utf-8") as f:
@@ -259,10 +302,22 @@ def start_slot(k, node):
         subprocess.run(["systemctl", "restart", f"gate-slot@{k}"], capture_output=True)
     deadline = time.time() + CONNECT_WAIT
     while time.time() < deadline:
-        if ppp_ip(k):
+        if slot_ip(k):
             return probe(k)
+        if INLINE and SSTPC[k].poll() is not None:
+            return False
         time.sleep(1)
     return False
+
+
+def slot_log_tail(k):
+    """run 模式下槽位日志的最后一行, 用来说明连接失败的原因"""
+    try:
+        with open(f"{LOG_DIR}/slot-{k}.log", encoding="utf-8", errors="replace") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        return f": {lines[-1]}" if lines else ""
+    except OSError:
+        return ""
 
 
 def load_state():
@@ -292,10 +347,11 @@ def sync(cfg):
         health = dict(zip(slots, pool.map(slot_healthy, slots)))
 
     # VPN Gate 各服务器独立分配 10.211.x.x, 不同槽位偶尔会拿到相同 IP, 重复的视为不健康
+    # (只影响 ppp 模式的内核路由; socks 模式每个槽位是独立的用户态网络栈, 不冲突)
     seen_ips = {}
     for k in slots:
-        if health[k]:
-            ip = ppp_ip(k)
+        if health[k] and not SOCKS_MODE:
+            ip = slot_ip(k)
             if ip in seen_ips:
                 log(f"slot{k}: IP {ip} 与 slot{seen_ips[ip]} 重复, 重新分配")
                 health[k] = False
@@ -334,11 +390,12 @@ def sync(cfg):
                 if start_slot(k, node):
                     with lock:
                         state["slots"][str(k)] = {"node": node["node"], "name": node["name"], "since": int(time.time())}
-                    log(f"slot{k}: 已连接 {node['name']} {node['node']} (ppp{k} {ppp_ip(k)})")
+                    log(f"slot{k}: 已连接 {node['name']} {node['node']} ({slot_dev(k)} {slot_ip(k)})")
                     return
                 with lock:
                     state["bad"][node["node"]] = time.time()
-                log(f"slot{k}: {node['node']} 连接失败")
+                reason = ": 隧道已建立, 但探测失败" if slot_ip(k) else slot_log_tail(k) if INLINE else ""
+                log(f"slot{k}: {node['node']} 连接失败{reason}")
             stop_slot(k)
 
         with ThreadPoolExecutor(max_workers=len(broken)) as pool:
@@ -369,6 +426,10 @@ def write_subscription(cfg, state):
     os.replace(tmp, SUB_FILE)
 
 
+def slot_dev(k):
+    return f"socks:{SOCKS_BASE + k}" if SOCKS_MODE else f"ppp{k}"
+
+
 def run(cfg):
     global INLINE
     INLINE = True
@@ -393,9 +454,9 @@ def status(cfg):
     state = load_state()
     for k in range(1, cfg["SLOTS"] + 1):
         slot = state["slots"].get(str(k))
-        ip = ppp_ip(k)
+        ip = slot_ip(k)
         desc = f"{slot['name']} {slot['node']}" if slot else "-"
-        print(f"slot{k}  ppp{k}={ip or 'down':<15} {desc}")
+        print(f"slot{k}  {slot_dev(k)}={ip or 'down':<15} {desc}")
     warp = load_warp(cfg)
     print(f"warp   {warp['endpoint'] if warp else '未启用'}")
 
@@ -406,12 +467,20 @@ def status(cfg):
 def xray_config(cfg):
     slots = range(1, cfg["SLOTS"] + 1)
     clients = [{"id": slot_uuid(cfg["UUID"], k), "email": f"slot{k}"} for k in slots]
-    outbounds = [{
-        "tag": f"slot{k}",
-        "protocol": "freedom",
-        "settings": {"domainStrategy": "UseIPv4"},
-        "streamSettings": {"sockopt": {"interface": f"ppp{k}"}},
-    } for k in slots]
+    if SOCKS_MODE:
+        # 域名交给 sstp-socks 在隧道内解析
+        outbounds = [{
+            "tag": f"slot{k}",
+            "protocol": "socks",
+            "settings": {"servers": [{"address": "127.0.0.1", "port": SOCKS_BASE + k}]},
+        } for k in slots]
+    else:
+        outbounds = [{
+            "tag": f"slot{k}",
+            "protocol": "freedom",
+            "settings": {"domainStrategy": "UseIPv4"},
+            "streamSettings": {"sockopt": {"interface": f"ppp{k}"}},
+        } for k in slots]
     rules = [{"type": "field", "user": [f"slot{k}"], "outboundTag": f"slot{k}"} for k in slots]
     warp = load_warp(cfg)
     if warp:

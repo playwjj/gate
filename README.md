@@ -53,7 +53,7 @@ WARP 槽位由 xray 内置的 WireGuard 直接连接 Cloudflare WARP，出口是
 - 一个 Cloudflare 账号（免费即可）
 - 一个 GitHub 账号
 - 一个已接入 Cloudflare 的域名
-- 一台能跑 PPP 的 Linux VPS（KVM 等完整虚拟机，Ubuntu/Debian；OpenVZ/LXC 一般没有 `/dev/ppp`），并已用 Cloudflare Tunnel（cloudflared）接入
+- 一台能跑 PPP 的 Linux VPS（KVM 等完整虚拟机，Ubuntu/Debian；OpenVZ/LXC 一般没有 `/dev/ppp`），并已用 Cloudflare Tunnel（cloudflared）接入；没有这样的 VPS 时，可以用下面的 [Docker 部署](#docker-部署可替代第-56-步)，它在 Northflank 等不给特权的容器平台上也能跑
 
 ### 第 1 步：部署检测 Worker
 
@@ -150,7 +150,10 @@ docker run -d --name gate-tunnel --restart unless-stopped \
   passport888/gate-tunnel
 ~~~
 
-- `--device /dev/ppp --cap-add NET_ADMIN` 只在能跑 PPP 的 KVM 主机上加（宿主机需已加载 `ppp_generic`：`modprobe ppp_generic`）。没有 `/dev/ppp` 时（Northflank 等托管容器平台），SSTP 槽位自动关闭，订阅里只有 WARP 节点；也可以用 `GATE_SLOTS=0` 主动关闭。
+- 槽位有两种实现，由 `GATE_SSTP_MODE` 选择，默认 `auto`：容器里有 `/dev/ppp` 时用 `ppp`，否则用 `socks`。
+  - `ppp`：sstpc + pppd 内核隧道，需要 `--device /dev/ppp --cap-add NET_ADMIN`，只能在 KVM 等主机上用（宿主机需已加载 `ppp_generic`：`modprobe ppp_generic`）。
+  - `socks`：用户态 SSTP 客户端 [`sstp-socks`](./sstp/)，自己实现了 SSTP / PPP（MS-CHAPv2）协议，IP 包交给 gVisor 的用户态 TCP/IP 栈，每个槽位在容器内提供一个 SOCKS5 端口（`21080+K`）给 xray。不需要 `/dev/ppp`、TUN 或任何特权，**Northflank 等托管容器平台用这个**，docker run 时去掉 `--device` 和 `--cap-add` 两个参数即可。TCP 和 UDP 都支持。
+  - 用 `GATE_SLOTS=0` 可以关闭 SSTP 槽位，只留 WARP。
 - `GATE_UUID` 默认等于 `UUID`，其余 `GATE_*` 变量含义与 `install.sh` 相同，见 [`docker/entrypoint.sh`](./docker/entrypoint.sh) 开头的注释。
 - 同一个 Tunnel 里配两条 Public Hostname，都指向容器内部：`vless.你的域名` → `http://localhost:3000`（work-tunnel-vless），`gate.你的域名` → `http://localhost:18080`（gate）。
 - 容器重建会重新注册 WARP 设备。注册后执行 `docker exec gate-tunnel base64 -w0 /etc/gate/warp.json`，把结果设为 `GATE_WARP_B64` 即可复用。
@@ -192,7 +195,7 @@ docker run -d --name gate-tunnel --restart unless-stopped \
 ## 说明与限制
 
 - 只输出 `vless://` 链接（VLESS + WebSocket + TLS）
-- SSTP 隧道由 Linux 内核的 PPP 承载，TCP/UDP 都支持；目标只支持 IPv4（VPN Gate 只分配 IPv4）
+- SSTP 隧道由 Linux 内核的 PPP（`ppp` 模式）或用户态网络栈（`socks` 模式）承载，TCP/UDP 都支持；目标只支持 IPv4（VPN Gate 只分配 IPv4）
 - 速度主要取决于 VPN Gate 节点本身的带宽，各节点差别很大，同一节点不同时段也不同
 - 没有匹配到槽位的流量会被丢弃，不会从 VPS 自己的 IP 出去
 - VPN Gate 是志愿者节点，随时可能下线；gate-manager 约 1 分钟内会把失效槽位换成新节点
@@ -203,7 +206,7 @@ docker run -d --name gate-tunnel --restart unless-stopped \
 
 ### 所有节点都连不上
 - 先在浏览器打开订阅地址，能看到一串 base64 文本说明 Tunnel 和 nginx 正常
-- 在 VPS 上运行 `gate-manager status`，看各槽位的 `pppK` 是否有 IP
+- 在 VPS 上运行 `gate-manager status`，看各槽位的 `pppK` 是否有 IP（Docker 里用 `docker exec gate-tunnel gate-manager status`，`socks` 模式显示为 `socks:端口`；单个槽位的日志在容器内 `/var/log/gate/slot-K.log`）
 - 查看日志：`journalctl -u gate-manager -n 50`、`journalctl -u gate-xray -n 50`
 
 ### 某个节点连不上

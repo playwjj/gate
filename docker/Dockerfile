@@ -15,6 +15,15 @@ RUN git clone -q --depth 1 --branch "$SSTP_VERSION" https://gitlab.com/sstp-proj
  && make install DESTDIR=/out \
  && rm -rf /out/usr/include /out/usr/share /out/usr/lib/*.la /out/usr/lib/pppd/*/*.la
 
+# 用户态 SSTP 客户端 (没有 /dev/ppp 的平台用), 纯 Go 静态编译, 在构建机架构上交叉编译
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS sstp-socks-build
+ARG TARGETARCH
+WORKDIR /src
+COPY sstp/go.mod sstp/go.sum ./
+RUN go mod download
+COPY sstp/*.go ./
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w" -o /out/sstp-socks .
+
 FROM ${BASE_IMAGE}
 ARG TARGETARCH
 ARG XRAY_VERSION=v26.3.27
@@ -31,10 +40,11 @@ RUN apk add --no-cache ppp-daemon libevent python3 nginx iproute2 tini unzip \
  && apk del unzip \
  && rm -f /etc/nginx/http.d/default.conf
 COPY --from=sstp-build /out/ /
+COPY --from=sstp-socks-build /out/sstp-socks /usr/local/bin/sstp-socks
 COPY vps/gate-manager.py /usr/local/bin/gate-manager
 COPY docker/entrypoint.sh /usr/local/bin/gate-entrypoint
 RUN chmod 755 /usr/local/bin/gate-manager /usr/local/bin/gate-entrypoint
 
-# tini 回收 pppd 等孤儿进程; 入口脚本最后 exec 原镜像的 /app/start.sh (node + cloudflared)
+# tini 回收 pppd / sstp-socks 等孤儿进程; 入口脚本最后 exec 原镜像的 /app/start.sh (node + cloudflared)
 ENTRYPOINT ["/sbin/tini", "-g", "--"]
 CMD ["/usr/local/bin/gate-entrypoint"]
