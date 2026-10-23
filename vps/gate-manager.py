@@ -423,7 +423,7 @@ def write_subscription(cfg, state):
         "encryption": "none", "security": "tls", "sni": host, "fp": "chrome",
         "type": "ws", "host": host, "path": WS_PATH,
     })
-    links = []
+    links = cfg.get("EXTRA_LINKS", "").split()  # 额外的固定节点 (如容器里 work-tunnel-vless 自己的节点), 空格分隔
     for k in range(1, cfg["SLOTS"] + 1):
         slot = state["slots"].get(str(k))
         remark = f"{k:02d}-{slot['name']}" if slot else f"{k:02d}-连接中"
