@@ -158,7 +158,7 @@ docker run -d --name gate-tunnel --restart unless-stopped \
 - 同一个 Tunnel 里配两条 Public Hostname，都指向容器内部：`vless.你的域名` → `http://localhost:3000`（work-tunnel-vless），`gate.你的域名` → `http://localhost:18080`（gate）。
 - 容器重建会重新注册 WARP 设备。注册后执行 `docker exec gate-tunnel base64 -w0 /etc/gate/warp.json`，把结果设为 `GATE_WARP_B64` 即可复用。
 - 订阅地址同第 7 步：`https://gate.你的域名/sub/<GATE_UUID>`。
-- 订阅里第一个节点是 work-tunnel-vless 自己的 VLESS 节点（连 `TUNNEL_DOMAIN`，出口是容器所在机器的 IP），名称默认 `VLESS`，可用 `GATE_VLESS_NAME` 改；不想放进订阅时设 `GATE_VLESS_SUB=0`。
+- 订阅里第一个节点是 work-tunnel-vless 自己的 VLESS 节点（连 `TUNNEL_DOMAIN`，出口是容器所在机器的 IP），名称默认 `work-tunnel-vl`，可用 `GATE_VLESS_NAME` 改；不想放进订阅时设 `GATE_VLESS_SUB=0`。
 
 ---
 

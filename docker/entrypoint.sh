@@ -14,7 +14,7 @@
 #   GATE_NODE_SEED  任意字符串, 按它打乱选节点的顺序; 多台机器各设不同的值, 就会优先连不同的 VPN Gate 节点
 #   GATE_WARP_B64   已有的 /etc/gate/warp.json 的 base64, 复用同一个 WARP 设备 (容器重建时建议设置)
 #   GATE_VLESS_SUB  1 (默认) 把 work-tunnel-vless 自己的 VLESS 节点 (TUNNEL_DOMAIN, 出口是容器所在机器的 IP) 也放进 gate 订阅, 0 不放
-#   GATE_VLESS_NAME 该节点在订阅里的名称, 默认 VLESS
+#   GATE_VLESS_NAME 该节点在订阅里的名称, 默认 work-tunnel-vl
 set -eu
 
 GATE_UUID="${GATE_UUID:-${UUID:-}}"
@@ -31,7 +31,7 @@ GATE_VLESS_SUB="${GATE_VLESS_SUB:-1}"
 GATE_EXTRA_LINKS=""
 if [ "$GATE_VLESS_SUB" = 1 ] && [ -n "${UUID:-}" ] && [ -n "${TUNNEL_DOMAIN:-}" ]; then
   vless_path=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "/work-tunnel-${NAME:-$(hostname)}")
-  vless_name=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "${GATE_VLESS_NAME:-VLESS}")
+  vless_name=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "${GATE_VLESS_NAME:-work-tunnel-vl}")
   GATE_EXTRA_LINKS="vless://$UUID@$TUNNEL_DOMAIN:443?encryption=none&security=tls&sni=$TUNNEL_DOMAIN&fp=chrome&type=ws&host=$TUNNEL_DOMAIN&path=$vless_path#$vless_name"
 fi
 
