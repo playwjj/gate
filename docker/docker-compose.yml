@@ -1,0 +1,20 @@
+# gate-tunnel 的 compose 部署
+#
+# 用法 (在 docker/ 目录下): cp gate.env.example gate.env, 填好后 docker compose up -d
+services:
+  gate-tunnel:
+    image: passport888/gate-tunnel
+    container_name: gate-tunnel
+    restart: unless-stopped
+    env_file: gate.env
+    # ppp 模式才需要下面两项 (宿主机需已 modprobe ppp_generic); socks 模式 (Northflank 等) 删掉即可
+    devices:
+      - /dev/ppp
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      # 持久化 warp.json, 重建容器不会重新注册 WARP 设备
+      - gate-etc:/etc/gate
+
+volumes:
+  gate-etc:

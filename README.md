@@ -150,6 +150,8 @@ docker run -d --name gate-tunnel --restart unless-stopped \
   passport888/gate-tunnel
 ~~~
 
+也可以用 env 文件和 docker-compose：在 [`docker/`](./docker/) 目录下把 `gate.env.example` 复制为 `gate.env` 并填好，然后执行 `docker compose up -d`（[`docker-compose.yml`](./docker/docker-compose.yml)）。compose 把 `/etc/gate` 挂成了卷，重建容器时会沿用已注册的 WARP 设备，不需要设置 `GATE_WARP_B64`。只想用 env 文件时，把上面命令里的 `-e` 换成 `--env-file gate.env`（值不要加引号）。
+
 - 槽位有两种实现，由 `GATE_SSTP_MODE` 选择，默认 `auto`：容器里有 `/dev/ppp` 时用 `ppp`，否则用 `socks`。
   - `ppp`：sstpc + pppd 内核隧道，需要 `--device /dev/ppp --cap-add NET_ADMIN`，只能在 KVM 等主机上用（宿主机需已加载 `ppp_generic`：`modprobe ppp_generic`）。
   - `socks`：用户态 SSTP 客户端 [`sstp-socks`](./sstp/)，自己实现了 SSTP / PPP（MS-CHAPv2）协议，IP 包交给 gVisor 的用户态 TCP/IP 栈，每个槽位在容器内提供一个 SOCKS5 端口（`21080+K`）给 xray。不需要 `/dev/ppp`、TUN 或任何特权，**Northflank 等托管容器平台用这个**，docker run 时去掉 `--device` 和 `--cap-add` 两个参数即可。TCP 和 UDP 都支持。

@@ -3,5 +3,5 @@ public/
 __pycache__/
 *.pyc
 
-Copy
-
+# Docker 部署的私有配置
+docker/gate.env
