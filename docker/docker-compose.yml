@@ -7,11 +7,12 @@ services:
     container_name: gate-tunnel
     restart: unless-stopped
     env_file: gate.env
-    # ppp 模式才需要下面两项 (宿主机需已 modprobe ppp_generic); socks 模式 (Northflank 等) 删掉即可
-    devices:
-      - /dev/ppp
-    cap_add:
-      - NET_ADMIN
+    # 默认不挂 /dev/ppp, 槽位走用户态 socks 模式, 任何主机都能启动.
+    # 想用 ppp 模式 (内核隧道): 宿主机先 sudo modprobe ppp_generic, 确认 /dev/ppp 存在, 再取消下面四行的注释
+    # devices:
+    #   - /dev/ppp
+    # cap_add:
+    #   - NET_ADMIN
     volumes:
       # 持久化 warp.json, 重建容器不会重新注册 WARP 设备
       - gate-etc:/etc/gate
