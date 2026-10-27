@@ -8,6 +8,28 @@
 
 ---
 
+## 项目优势：减少对 Cloudflare 的依赖
+
+原项目的节点检测要部署一个 Cloudflare Worker，在 Worker 里拨 SSTP 隧道、读出口 IP。这条路有几个硬伤：
+
+- **账号风险**：用 Worker 批量建立 VPN 隧道、转发流量，容易触发 Cloudflare 的滥用检测，Worker 被停用乃至账号受限的情况并不少见；检测一挂，整条流水线就停了
+- **免费额度限制**：每轮要并发检测上百个节点，免费版 Workers 的请求数、子请求数和 CPU 时间限制很容易碰到
+- **部署和维护麻烦**：要单独部署 Worker，在仓库里配 `CHECK_WORKER` Secret，还要防 Worker 地址泄露被别人盗用额度
+
+现在检测器直接内置在仓库里（[`sstp_check.mjs`](./sstp_check.mjs)），自己实现了 SSTP + PPP + TCP，零依赖，随 GitHub Actions 一起运行：
+
+| | 旧方案：检测 Worker | 现方案：内置检测器 |
+| :--- | :--- | :--- |
+| 检测在哪里跑 | Cloudflare Workers | GitHub Actions 运行器 |
+| 要部署的外部服务 | 一个 Worker | 无 |
+| 要配置的 Secret | `CHECK_WORKER` | 无 |
+| Cloudflare 账号风险 | Worker 拨 VPN 隧道，可能被判定滥用 | 检测不经过 Cloudflare 账号 |
+| 检测方式 | Worker 拨通隧道并读出口 IP | 一样：真实拨通 SSTP 隧道，经隧道访问 iplocate.io 读出口 IP / ASN / 机房属性 |
+
+Cloudflare 现在只用于**入口**：域名解析、Cloudflare Tunnel，以及可选的 WARP 槽位（`GATE_WARP=0` 可关闭）。这些都是 Cloudflare 的常规用法，不涉及在 Cloudflare 上跑代理代码。
+
+---
+
 ## 架构
 
 ~~~text
@@ -50,7 +72,7 @@ WARP 槽位由 xray 内置的 WireGuard 直接连接 Cloudflare WARP，出口是
 
 ### 前置条件
 
-- 一个 Cloudflare 账号（免费即可）
+- 一个 Cloudflare 账号（免费即可，只用于域名和 Tunnel，不需要部署 Worker）
 - 一个 GitHub 账号
 - 一个已接入 Cloudflare 的域名
 - 一台能跑 PPP 的 Linux VPS（KVM 等完整虚拟机，Ubuntu/Debian；OpenVZ/LXC 一般没有 `/dev/ppp`），并已用 Cloudflare Tunnel（cloudflared）接入；没有这样的 VPS 时，可以用下面的 [Docker 部署](#docker-部署可替代第-34-步)，它在 Northflank 等不给特权的容器平台上也能跑
@@ -59,7 +81,7 @@ WARP 槽位由 xray 内置的 WireGuard 直接连接 Cloudflare WARP，出口是
 
 在 GitHub 上打开本仓库，点 **Fork**，复制到你的账号下。
 
-> 节点检测已内置在仓库里（`sstp_check.mjs`，Node.js 实现的 SSTP 客户端，随 GitHub Actions 一起运行）：不需要部署任何外部检测服务，也不需要配置任何 Secret。
+> 节点检测已内置在仓库里（`sstp_check.mjs`，Node.js 实现的 SSTP 客户端，随 GitHub Actions 一起运行）：**不需要部署检测 Worker，也不需要配置任何 Secret**，Fork 之后直接进入第 2 步。
 
 ### 第 2 步：开启 GitHub Pages 与 Actions
 
@@ -206,7 +228,13 @@ docker run -d --name gate-tunnel --restart unless-stopped \
 到 Actions 页看最近一次运行是否成功。GitHub 定时任务本身会延迟几分钟到半小时，属正常现象。公开仓库 60 天没有任何提交时，GitHub 会自动暂停定时任务，需要到 Actions 页重新启用。
 
 ### 检测全部失败
-检测器是仓库内置的 Node.js 脚本（`sstp_check.mjs`），随 Actions 运行，没有外部服务可坏。先看 Actions 日志里 `SSTP CHECK` 一节的逐节点失败原因；若全部节点都是同一种错误（如运行环境网络问题），换时间重跑一次再判断。
+检测器是仓库内置的 Node.js 脚本（`sstp_check.mjs`），随 Actions 运行，不依赖任何需要自己部署的外部服务。先看 Actions 日志里 `SSTP CHECK` 一节的逐节点失败原因；若全部节点都是同一种错误（如运行环境网络问题），换时间重跑一次再判断。
+
+### 部分节点可用但没有出口 IP
+检测时经隧道访问 iplocate.io 读取出口信息。VPN Gate 的 `public-vpn-*` 节点共用少量出口 IP，常被 iplocate 限流（HTTP 429）。能收到 429 说明隧道已经端到端打通，这类节点仍记为可用，只是出口 IP 留空，住宅/机房按主机名判断。
+
+### 本地运行检测全部 `TCP handshake through SSTP timed out`
+检测器用本机 DNS 解析 `www.iplocate.io`。如果本机开着 Clash、Surge 等 fake-ip 模式的代理，解析结果会是 `198.18.x.x` 这种假地址，经 VPN Gate 隧道发过去自然没有回应。关掉代理的 fake-ip 模式，或在 GitHub Actions 上运行即可。
 
 ---
 
@@ -216,7 +244,7 @@ docker run -d --name gate-tunnel --restart unless-stopped \
 | :--- | :--- |
 | [hezhanleiok/gate](https://github.com/hezhanleiok/gate) | 本项目的原始项目：节点抓取、检测与 GitHub Pages 发布流程 |
 | [VPN Gate](https://www.vpngate.net/) | SSTP 节点数据源 |
-| [lsh8848/cm-Workers-CheckSocks5](https://github.com/lsh8848/cm-Workers-CheckSocks5) | 早期版本的检测 Worker；现检测已改为仓库内置的 Node.js 实现（`sstp_check.mjs`），不再依赖外部 Worker |
+| [lsh8848/cm-Workers-CheckSocks5](https://github.com/lsh8848/cm-Workers-CheckSocks5) | 早期版本的检测 Worker；`sstp_check.mjs` 沿用了它的结果格式，检测现已改为仓库内置，不再依赖 Cloudflare Worker |
 | [fdciabdul/Vpngate-Scraper-API](https://github.com/fdciabdul/Vpngate-Scraper-API) | VPN Gate 节点数据的 GitHub 镜像（官方源失效时回退） |
 | [sstp-client](https://sourceforge.net/projects/sstp-client/) | Linux SSTP 客户端 |
 | [Xray-core](https://github.com/XTLS/Xray-core) | VLESS 服务端 |

@@ -312,7 +312,8 @@ def check_all(nodes):
         "timeoutMs": int(CHECK_TIMEOUT * 1000),
     }
     waves = max(1, -(-len(nodes) // max(1, CONCURRENCY)))
-    proc_timeout = waves * CHECK_TIMEOUT + 120
+    # 单节点最坏情况: 首次检测 + 429 重试 (各 CHECK_TIMEOUT) + 3s 间隔
+    proc_timeout = waves * (2 * CHECK_TIMEOUT + 3) + 120
     try:
         proc = subprocess.run(
             ["node", CHECKER_SCRIPT],

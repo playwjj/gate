@@ -45,7 +45,7 @@
 <body>
 <div class="wrap">
   <h1>VPN Gate · SSTP 节点检测</h1>
-  <div class="sub">节点来自 VPN Gate（仅 TCP 入口中继），检测由 Cloudflare Worker 执行，GitHub Actions 定时刷新</div>
+  <div class="sub">节点来自 VPN Gate（仅 TCP 入口中继），检测由仓库内置的 SSTP 检测器执行，GitHub Actions 定时刷新</div>
 
   <div class="cards" id="cards"></div>
 
@@ -74,7 +74,7 @@ function renderCards(d) {
   const items = [
     ["最后更新", d.generated_at || "-", "时区 UTC"],
     ["SSTP 节点", s.sstp_nodes, "筛选自 VPN Gate"],
-    ["已检测", s.checked, "提交给 Worker"],
+    ["已检测", s.checked, "提交检测"],
     ["可用节点", s.success, "success = true"],
     ["国家数量", s.countries, "按可用节点统计"],
     ["住宅(估算)", s.residential_est, "数据中心 " + (s.datacenter_est || 0)]
@@ -113,7 +113,7 @@ function renderCountries() {
     .sort(function (a, b) { return b[1].count - a[1].count; });
 
   if (!entries.length) {
-    box.innerHTML = '<div class="country"><div class="empty">没有符合当前筛选的可用节点（本轮 Worker 判定全部不可用或无数据）</div></div>';
+    box.innerHTML = '<div class="country"><div class="empty">没有符合当前筛选的可用节点（本轮检测全部不可用或无数据）</div></div>';
     return;
   }
   box.innerHTML = entries.map(function (x) {

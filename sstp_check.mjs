@@ -427,6 +427,7 @@ class TcpOverPpp extends Duplex {
     this.finReceived = false;
     this.synAckWaiter = null;
     this.dead = false;
+    this.outOfOrder = new Map(); // seq → { payload, fin }: 先到的乱序段, 等缺口补齐再交付
   }
 
   buildFrame(flags, payload = EMPTY) {
@@ -490,9 +491,17 @@ class TcpOverPpp extends Duplex {
     const synAck = new Promise((resolve, reject) => {
       this.synAckWaiter = { resolve, reject };
     });
-    await this.client.write(this.buildFrame(0x02)); // SYN
+    const syn = this.buildFrame(0x02); // SYN
     this.seq = (this.seq + 1) >>> 0;
-    const incoming = await withTimeout(synAck, Math.min(this.client.remaining(), 10000), 'TCP handshake through SSTP timed out');
+    await this.client.write(syn);
+    // 没有完整的重传机制, 至少重发 SYN: 隧道刚建好时首个包被丢的情况并不少见
+    const resend = setInterval(() => this.client.write(syn).catch(() => {}), 3000);
+    let incoming;
+    try {
+      incoming = await withTimeout(synAck, Math.min(this.client.remaining(), 10000), 'TCP handshake through SSTP timed out');
+    } finally {
+      clearInterval(resend);
+    }
     this.ack = (incoming.sequence + 1) >>> 0;
     await this.client.write(this.buildFrame(0x10)); // ACK
   }
@@ -513,18 +522,56 @@ class TcpOverPpp extends Duplex {
       return;
     }
 
-    const payload = incoming.payloadOffset < ppp.ipPacket.length
+    if (this.synAckWaiter) return; // 握手完成前的其他段一律忽略
+
+    if (incoming.flags & 0x04) { // RST
+      this.finReceived = true;
+      this.push(null);
+      return;
+    }
+
+    let payload = incoming.payloadOffset < ppp.ipPacket.length
       ? ppp.ipPacket.subarray(incoming.payloadOffset)
       : EMPTY;
-    if (payload.length) {
-      this.ack = (incoming.sequence + payload.length) >>> 0;
-      this.push(Buffer.from(payload));
-      this.client.write(this.buildFrame(0x10)).catch(() => {}); // ACK
+    const fin = (incoming.flags & 0x01) !== 0;
+    if (!payload.length && !fin) return; // 纯 ACK
+
+    // 按序号重组: 重复段丢弃 (部分重叠的裁掉头部), 超前的段先缓存;
+    // 两种情况都立刻回 ACK, 让对端尽快重传缺口
+    const offset = (incoming.sequence - this.ack) | 0;
+    if (offset < 0) {
+      if (-offset >= payload.length) {
+        this.client.write(this.buildFrame(0x10)).catch(() => {});
+        return;
+      }
+      payload = payload.subarray(-offset);
+    } else if (offset > 0) {
+      if (!this.outOfOrder.has(incoming.sequence)) {
+        this.outOfOrder.set(incoming.sequence, { payload: Buffer.from(payload), fin });
+      }
+      this.client.write(this.buildFrame(0x10)).catch(() => {});
+      return;
     }
-    if (incoming.flags & 0x01) { // FIN
+
+    this.deliver(payload, fin);
+    while (!this.finReceived && this.outOfOrder.has(this.ack)) {
+      const next = this.outOfOrder.get(this.ack);
+      this.outOfOrder.delete(this.ack);
+      this.deliver(next.payload, next.fin);
+    }
+    try {
+      await this.client.write(this.buildFrame(this.finReceived ? 0x11 : 0x10)); // ACK / FIN+ACK
+    } catch { /* ignore */ }
+  }
+
+  deliver(payload, fin) {
+    if (payload.length) {
+      this.ack = (this.ack + payload.length) >>> 0;
+      this.push(Buffer.from(payload));
+    }
+    if (fin) {
       this.finReceived = true;
       this.ack = (this.ack + 1) >>> 0;
-      try { await this.client.write(this.buildFrame(0x11)); } catch { /* ignore */ }
       this.push(null);
     }
   }
@@ -615,7 +662,10 @@ async function checkNode(node, timeoutMs) {
             const statusMatch = headerText.split('\r\n')[0].match(/HTTP\/\d(?:\.\d)?\s+(\d+)/i);
             const statusCode = statusMatch ? Number(statusMatch[1]) : NaN;
             if (!Number.isFinite(statusCode) || statusCode < 200 || statusCode >= 300) {
-              throw new Error(`Target /api/lookup request failed: ${headerText.split('\r\n')[0]}`);
+              const err = new Error(`Target /api/lookup request failed: ${headerText.split('\r\n')[0]}`);
+              // 能收到目标的 HTTP 响应, 说明隧道本身已端到端打通, 只是出口信息拿不到
+              if (Number.isFinite(statusCode)) err.httpStatus = statusCode;
+              throw err;
             }
             let bodyText = text.slice(headerEnd + 4);
             if (/transfer-encoding:\s*chunked/i.test(headerText)) {
@@ -639,7 +689,8 @@ async function checkNode(node, timeoutMs) {
               asn: json.asn
                 ? { ...json.asn, org: json.asn.name, descr: json.asn.name }
                 : json.asn,
-              is_datacenter: json.privacy?.is_hosting || false,
+              // 未返回 privacy 时给 null, 交给 vpngate.py 按 ASN / 主机名判断, 而不是一律当住宅
+              is_datacenter: json.privacy?.is_hosting ?? null,
             });
           } catch (err) {
             reject(err);
@@ -668,6 +719,7 @@ async function checkNode(node, timeoutMs) {
       colo: null,
       exit: null,
       error: error?.message || String(error),
+      httpStatus: error?.httpStatus ?? null,
     };
   } finally {
     try { session?.destroy(); } catch { /* ignore */ }
@@ -705,6 +757,11 @@ async function main() {
         retry.responseTime += result.responseTime;
         result = retry;
       }
+      // 仍被限流 (共享出口的节点常见): 隧道已验证可用, 记为成功, 出口信息留空
+      if (!result.success && result.httpStatus === 429) {
+        result = { ...result, success: true, error: null };
+      }
+      delete result.httpStatus;
       results[index] = result;
       done += 1;
       const r = results[index];
