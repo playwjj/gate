@@ -6,6 +6,8 @@
 
 本项目基于 [hezhanleiok/gate](https://github.com/hezhanleiok/gate) 修改。
 
+**🌐 实时节点页（本项目的运行实例，每 30 分钟自动更新）：[playwjj.github.io/gate](https://playwjj.github.io/gate/)**
+
 ---
 
 ## 项目优势：减少对 Cloudflare 的依赖
