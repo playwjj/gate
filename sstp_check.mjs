@@ -1007,15 +1007,15 @@ async function main() {
       let result = await checkNode(nodes[index], timeoutMs);
       // iplocate 对热门出口 IP (如 SoftEther 共享 NAT 池) 会限流 429:
       // 这类节点隧道本身是通的, 整节点重试一次 (新隧道) 往往就能过
-      if (!result.success && /request failed: HTTP\/1\.1 429/.test(result.error || '')) {
+      if (!result.success && result.httpStatus === 429) {
         await new Promise((r) => setTimeout(r, 3000));
         const retry = await checkNode(nodes[index], timeoutMs);
         retry.responseTime += result.responseTime;
-        result = retry;
-      }
-      // 仍被限流 (共享出口的节点常见): 隧道已验证可用, 记为成功, 出口信息留空
-      if (!result.success && result.httpStatus === 429) {
-        result = { ...result, success: true, error: null };
+        // 重试没拿到出口信息 (仍被限流, 或这次隧道超时 / 被断开) 时, 以第一次为准:
+        // 第一次已经收到目标的 HTTP 响应, 隧道验证过可用, 记为成功, 出口信息留空
+        result = retry.success
+          ? retry
+          : { ...result, success: true, error: null, responseTime: retry.responseTime };
       }
       delete result.httpStatus;
       results[index] = result;
