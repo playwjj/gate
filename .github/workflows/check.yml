@@ -28,16 +28,20 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Get VPN Gate nodes + check via Cloudflare Worker + build page
+      - name: Get VPN Gate nodes + check with built-in SSTP checker + build page
         run: python vpngate.py
         env:
-          # 检测 Worker 地址, 在仓库 Settings → Secrets and variables → Actions → Secrets 设置 CHECK_WORKER
-          CHECK_WORKER: ${{ secrets.CHECK_WORKER }}
+          # 节点检测由仓库内置的 sstp_check.mjs (Node.js) 完成, 无需任何 Secret
           CHECK_CONCURRENCY: "32"
-          CHECK_TIMEOUT: "90"
+          CHECK_TIMEOUT: "45"
           # 可选: 自定义域名时在仓库 Settings → Variables 设置 NODES_URL; 未设置则自动推导
           NODES_URL: ${{ vars.NODES_URL }}
 
