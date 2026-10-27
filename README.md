@@ -17,8 +17,8 @@ VPN Gate 官方源
 筛选 SSTP 节点 → 去重
       │
       ▼
-检测 Worker（Cloudflare）
-      │  GET /check?sstp=vpn:vpn@host:port → 是否可用 + 出口 IP（住宅/机房判定）
+内置 SSTP 检测器（Node.js，随 Actions 运行）
+      │  真实拨通 SSTP 隧道 → 是否可用 + 出口 IP（住宅/机房判定）
       ▼
 保留可用节点 → 按国家分组 → 住宅/机房标注 → 延迟排序
       │
@@ -53,33 +53,15 @@ WARP 槽位由 xray 内置的 WireGuard 直接连接 Cloudflare WARP，出口是
 - 一个 Cloudflare 账号（免费即可）
 - 一个 GitHub 账号
 - 一个已接入 Cloudflare 的域名
-- 一台能跑 PPP 的 Linux VPS（KVM 等完整虚拟机，Ubuntu/Debian；OpenVZ/LXC 一般没有 `/dev/ppp`），并已用 Cloudflare Tunnel（cloudflared）接入；没有这样的 VPS 时，可以用下面的 [Docker 部署](#docker-部署可替代第-56-步)，它在 Northflank 等不给特权的容器平台上也能跑
+- 一台能跑 PPP 的 Linux VPS（KVM 等完整虚拟机，Ubuntu/Debian；OpenVZ/LXC 一般没有 `/dev/ppp`），并已用 Cloudflare Tunnel（cloudflared）接入；没有这样的 VPS 时，可以用下面的 [Docker 部署](#docker-部署可替代第-34-步)，它在 Northflank 等不给特权的容器平台上也能跑
 
-### 第 1 步：部署检测 Worker
-
-1. 打开 https://github.com/lsh8848/cm-Workers-CheckSocks5
-2. Cloudflare 控制台 → **Workers 和 Pages** → **创建** → **创建 Worker**
-3. 把 `_worker.js` 的全部内容粘贴进编辑器，点 **部署**
-4. 记下 Worker 地址，形如 `https://check-sstp.你的用户名.workers.dev`
-5. 验证：浏览器打开 `https://你的检测Worker域名/check?sstp=vpn:vpn@任意节点:端口`，能返回 JSON 即成功
-
-### 第 2 步：Fork 本仓库
+### 第 1 步：Fork 本仓库
 
 在 GitHub 上打开本仓库，点 **Fork**，复制到你的账号下。
 
-### 第 3 步：配置 Secret
+> 节点检测已内置在仓库里（`sstp_check.mjs`，Node.js 实现的 SSTP 客户端，随 GitHub Actions 一起运行）：不需要部署任何外部检测服务，也不需要配置任何 Secret。
 
-检测 Worker 地址保存在 GitHub Secrets 里，防止公开后被别人盗用额度。**不需要修改任何代码或工作流文件。**
-
-1. 进入你 Fork 后的仓库 → **Settings** → **Secrets and variables → Actions** → **Secrets** 标签页
-2. 点 **New repository secret**：
-   - **Name**：`CHECK_WORKER`（必须完全一致）
-   - **Secret**：完整检测链接，例如 `https://check-sstp.你的用户名.workers.dev/check?sstp=vpn:vpn@`
-3. 点 **Add secret** 保存
-
-> 未设置 `CHECK_WORKER` 时，工作流会直接失败并提示添加。Secret 的值在 Actions 日志里显示为 `***`，也不会写入公开的网页数据。
-
-### 第 4 步：开启 GitHub Pages 与 Actions
+### 第 2 步：开启 GitHub Pages 与 Actions
 
 1. 仓库 → **Settings → Pages**，**Source** 选 **GitHub Actions**（选中即生效，没有保存按钮；不要点下方推荐工作流的 Configure）
 2. 进 **Actions** 页，若提示启用 Actions 就点启用
@@ -93,7 +75,7 @@ https://你的GitHub用户名.github.io/仓库名/            ← 节点网页
 https://你的GitHub用户名.github.io/仓库名/nodes.txt   ← 节点清单
 ~~~
 
-### 第 5 步：在 VPS 上安装
+### 第 3 步：在 VPS 上安装
 
 把 [`vps/`](./vps/) 目录复制到 VPS，以 root 运行：
 
@@ -112,7 +94,7 @@ GATE_UUID=$GATE_UUID GATE_HOST=gate.你的域名 bash vps/install.sh
 gate-manager status
 ~~~
 
-### 第 6 步：Cloudflare Tunnel 添加路由
+### 第 4 步：Cloudflare Tunnel 添加路由
 
 Zero Trust → 网络 → Tunnels → 你的隧道 → **已发布应用程序路由** → 添加：
 
@@ -124,7 +106,7 @@ Zero Trust → 网络 → Tunnels → 你的隧道 → **已发布应用程序�
 
 > cloudflared 跑在 Docker 容器里时用 `172.17.0.1`（docker0）；直接装在 VPS 上时用 `127.0.0.1:18080`，安装时设置 `GATE_LISTEN=127.0.0.1`。安装脚本结束时会打印实际要填的地址。
 
-### 第 7 步：客户端添加订阅
+### 第 5 步：客户端添加订阅
 
 ~~~text
 https://gate.你的域名/sub/你的GATE_UUID
@@ -138,7 +120,7 @@ https://gate.你的域名/sub/你的GATE_UUID
 
 如果 VPS 会定期重建，可以在部署流程里检出本仓库，把 `vps/` 复制上去后执行 `install.sh`，`GATE_UUID` 放在 CI 的 Secret 里。
 
-### Docker 部署（可替代第 5、6 步）
+### Docker 部署（可替代第 3、4 步）
 
 镜像 [`passport888/gate-tunnel`](https://hub.docker.com/r/passport888/gate-tunnel) 在 [work-tunnel-vless](https://github.com/playwjj/work-tunnel-vless)（node VLESS + cloudflared）的基础上附加了本仓库的 VPS 部分，一个容器里同时跑两套服务，cloudflared 也在容器内，不需要在宿主机另外安装。
 
@@ -159,7 +141,7 @@ docker run -d --name gate-tunnel --restart unless-stopped \
 - `GATE_UUID` 默认等于 `UUID`，其余 `GATE_*` 变量含义与 `install.sh` 相同，见 [`docker/entrypoint.sh`](./docker/entrypoint.sh) 开头的注释。
 - 同一个 Tunnel 里配两条 Public Hostname，都指向容器内部：`vless.你的域名` → `http://localhost:3000`（work-tunnel-vless），`gate.你的域名` → `http://localhost:18080`（gate）。
 - 容器重建会重新注册 WARP 设备。注册后执行 `docker exec gate-tunnel base64 -w0 /etc/gate/warp.json`，把结果设为 `GATE_WARP_B64` 即可复用。
-- 订阅地址同第 7 步：`https://gate.你的域名/sub/<GATE_UUID>`。
+- 订阅地址同第 5 步：`https://gate.你的域名/sub/<GATE_UUID>`。
 - 订阅里第一个节点是 work-tunnel-vless 自己的 VLESS 节点（连 `TUNNEL_DOMAIN`，出口是容器所在机器的 IP），名称默认 `work-tunnel-vl`，可用 `GATE_VLESS_NAME` 改；不想放进订阅时设 `GATE_VLESS_SUB=0`。
 
 ---
@@ -170,7 +152,6 @@ docker run -d --name gate-tunnel --restart unless-stopped \
 
 | 名称 | 类型 | 说明 |
 | :--- | :--- | :--- |
-| `CHECK_WORKER` | Secret（必填） | 检测 Worker 地址，形如 `https://xxx.workers.dev/check?sstp=vpn:vpn@` |
 | `NODES_URL` | Variable（可选） | nodes.txt 的发布地址，只用于日志提示；给 Pages 绑定自定义域名时设置，否则自动推导 |
 
 **VPS 安装参数**（`vps/install.sh` 的环境变量）：
@@ -191,7 +172,7 @@ docker run -d --name gate-tunnel --restart unless-stopped \
 | 常量 / 环境变量 | 说明 |
 | :--- | :--- |
 | `CHECK_CONCURRENCY` | 检测并发数，默认 32 |
-| `CHECK_TIMEOUT` | 单个节点检测超时（秒），默认 90 |
+| `CHECK_TIMEOUT` | 单个节点检测超时（秒），默认 45 |
 | `MAX_CHECK_NODES` | 最多检测的节点数，默认 0（不限） |
 
 ---
@@ -224,8 +205,8 @@ docker run -d --name gate-tunnel --restart unless-stopped \
 ### 节点没有更新
 到 Actions 页看最近一次运行是否成功。GitHub 定时任务本身会延迟几分钟到半小时，属正常现象。公开仓库 60 天没有任何提交时，GitHub 会自动暂停定时任务，需要到 Actions 页重新启用。
 
-### 检测 Worker 报错
-确认检测 Worker 部署成功、仓库 Secret `CHECK_WORKER` 填对，浏览器直接访问 `https://你的检测Worker/check?sstp=...` 看是否返回 JSON。
+### 检测全部失败
+检测器是仓库内置的 Node.js 脚本（`sstp_check.mjs`），随 Actions 运行，没有外部服务可坏。先看 Actions 日志里 `SSTP CHECK` 一节的逐节点失败原因；若全部节点都是同一种错误（如运行环境网络问题），换时间重跑一次再判断。
 
 ---
 
@@ -235,7 +216,7 @@ docker run -d --name gate-tunnel --restart unless-stopped \
 | :--- | :--- |
 | [hezhanleiok/gate](https://github.com/hezhanleiok/gate) | 本项目的原始项目：节点抓取、检测与 GitHub Pages 发布流程 |
 | [VPN Gate](https://www.vpngate.net/) | SSTP 节点数据源 |
-| [lsh8848/cm-Workers-CheckSocks5](https://github.com/lsh8848/cm-Workers-CheckSocks5) | 检测 Worker：验证 SSTP 节点可用性并读取出口 IP |
+| [lsh8848/cm-Workers-CheckSocks5](https://github.com/lsh8848/cm-Workers-CheckSocks5) | 早期版本的检测 Worker；现检测已改为仓库内置的 Node.js 实现（`sstp_check.mjs`），不再依赖外部 Worker |
 | [fdciabdul/Vpngate-Scraper-API](https://github.com/fdciabdul/Vpngate-Scraper-API) | VPN Gate 节点数据的 GitHub 镜像（官方源失效时回退） |
 | [sstp-client](https://sourceforge.net/projects/sstp-client/) | Linux SSTP 客户端 |
 | [Xray-core](https://github.com/XTLS/Xray-core) | VLESS 服务端 |

@@ -6,7 +6,7 @@ VPN Gate SSTP 节点检测流水线 (精简版)
   1. 获取 VPN Gate 原始节点
   2. 只保留带 TCP 入口的 SSTP 节点
   3. 去重
-  4. 并发调用检测 Worker
+  4. 并发调用内置 SSTP 检测器 (sstp_check.mjs, Node.js, 随仓库运行)
   5. 生成 public/data.json + public/index.html + public/nodes.txt
 """
 
@@ -16,11 +16,10 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from urllib.parse import quote
 
 import requests
 
@@ -40,8 +39,8 @@ VPNGATE_MIRROR = os.environ.get(
     "VPNGATE_MIRROR",
     "https://raw.githubusercontent.com/fdciabdul/Vpngate-Scraper-API/main/json/data.json",
 )
-# 检测 Worker 地址: Action 中来自仓库 Secret CHECK_WORKER (日志自动打码, 不写入公开的 data.json)
-WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "").strip() or "https://你的域名/check?sstp=vpn:vpn@"
+# 内置 SSTP 检测器 (Node.js 脚本, 与本文件同目录; 不再依赖外部检测 Worker)
+CHECKER_SCRIPT = os.path.join(REPO_DIR, "sstp_check.mjs")
 CONCURRENCY = max(1, int(os.environ.get("CHECK_CONCURRENCY", "32")))
 CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT", "90"))
 MAX_CHECK_NODES = int(os.environ.get("MAX_CHECK_NODES", "0"))
@@ -249,7 +248,7 @@ def dedupe(nodes):
     return out
 
 # ---------------------------------------------------------------------------
-# 检测 Worker
+# 内置 SSTP 检测 (sstp_check.mjs)
 # ---------------------------------------------------------------------------
 def classify_network(host, exit_org, is_datacenter=None):
     if is_datacenter is True: return "datacenter"
@@ -263,8 +262,8 @@ def classify_network(host, exit_org, is_datacenter=None):
     if re.match(r"^vpn\d{5,}", h) or re.match(r"^vpnv\d+", h): return "residential"
     return "unknown"
 
-def check_one(node, session):
-    url = WORKER_CHECK_URL + quote(f"{node['host']}:{node['port']}", safe="")
+def build_check_result(node, j):
+    """把检测器返回的单节点 JSON 整理成流水线统一的结果结构"""
     out = dict(node)
     out["protocol"] = "sstp"
     out["link"] = f"sstp://vpn:vpn@{node['host']}:{node['port']}"
@@ -272,50 +271,73 @@ def check_one(node, session):
     out["checked_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     out["exit"] = None
     out["residential"] = "unknown"
-    try:
-        r = session.get(url, timeout=CHECK_TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (gate-checker)"})
-        if r.status_code != 200:
-            out["error"] = f"HTTP {r.status_code}"
-            out["worker_error"] = True
-            return out
-        j = r.json()
-        ok = bool(j.get("success"))
-        out["success"] = ok
-        out["status"] = "success" if ok else "failed"
-        out["latency_ms"] = j.get("responseTime")
-        out["colo"] = j.get("colo")
-        out["error"] = (None if ok else (j.get("error") or j.get("message") or "check failed"))
-        exit_info = j.get("exit") or {}
-        if exit_info:
-            asn = exit_info.get("asn") or {}
-            org = asn.get("org") or asn.get("name") or ""
-            out["exit"] = {
-                "ip": exit_info.get("ip"),
-                "country": exit_info.get("country"),
-                "country_code": exit_info.get("country_code"),
-                "city": exit_info.get("city"),
-                "continent": exit_info.get("continent"),
-                "asn": asn.get("asn"),
-                "org": org,
-                "type": asn.get("type"),
-                "is_datacenter": exit_info.get("is_datacenter"),
-            }
-            out["residential"] = classify_network(out["host"], org, exit_info.get("is_datacenter"))
-        else:
-            out["residential"] = classify_network(out["host"], None, None)
+    if j is None:
+        out["error"] = "检测器未返回该节点结果"
+        out["checker_error"] = True
         return out
-    except Exception as exc:
-        out["error"] = f"{type(exc).__name__}: {exc}"
-        out["worker_error"] = True
-        return out
+    ok = bool(j.get("success"))
+    out["success"] = ok
+    out["status"] = "success" if ok else "failed"
+    out["latency_ms"] = j.get("responseTime")
+    out["colo"] = j.get("colo")
+    out["error"] = (None if ok else (j.get("error") or j.get("message") or "check failed"))
+    exit_info = j.get("exit") or {}
+    if exit_info:
+        asn = exit_info.get("asn") or {}
+        org = asn.get("org") or asn.get("name") or ""
+        out["exit"] = {
+            "ip": exit_info.get("ip"),
+            "country": exit_info.get("country"),
+            "country_code": exit_info.get("country_code"),
+            "city": exit_info.get("city"),
+            "continent": exit_info.get("continent"),
+            "asn": asn.get("asn"),
+            "org": org,
+            "type": asn.get("type"),
+            "is_datacenter": exit_info.get("is_datacenter"),
+        }
+        out["residential"] = classify_network(out["host"], org, exit_info.get("is_datacenter"))
+    else:
+        out["residential"] = classify_network(out["host"], None, None)
+    return out
 
-def check_all(nodes, session):
-    results = []
-    with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
-        futures = [pool.submit(check_one, n, session) for n in nodes]
-        for fut in as_completed(futures):
-            results.append(fut.result())
-    return results
+def check_all(nodes):
+    """一次性把全部节点交给内置 Node 检测器 (sstp_check.mjs) 并发检测"""
+    payload = {
+        "nodes": [
+            {"host": n["host"], "port": n["port"], "username": "vpn", "password": "vpn"}
+            for n in nodes
+        ],
+        "concurrency": CONCURRENCY,
+        "timeoutMs": int(CHECK_TIMEOUT * 1000),
+    }
+    waves = max(1, -(-len(nodes) // max(1, CONCURRENCY)))
+    proc_timeout = waves * CHECK_TIMEOUT + 120
+    try:
+        proc = subprocess.run(
+            ["node", CHECKER_SCRIPT],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=proc_timeout,
+        )
+    except FileNotFoundError:
+        die("未找到 node 运行时: 内置 SSTP 检测器需要 Node.js >= 18 (GitHub Actions 的 ubuntu-latest 自带)")
+    except subprocess.TimeoutExpired:
+        die(f"检测器整体超时 ({proc_timeout}s), 本次运行判定失败")
+    for line in (proc.stderr or "").splitlines():
+        if line.strip():
+            log("CHECK", line)
+    if proc.returncode != 0:
+        die(f"检测器异常退出 (exit {proc.returncode}): {(proc.stderr or '')[-500:]}")
+    try:
+        by_key = {
+            (r["host"].lower(), r["port"]): r
+            for r in json.loads(proc.stdout)["results"]
+        }
+    except Exception as exc:
+        die(f"检测器输出无法解析: {type(exc).__name__}: {exc}")
+    return [build_check_result(n, by_key.get((n["host"].lower(), n["port"]))) for n in nodes]
 
 # ---------------------------------------------------------------------------
 # 生成数据
@@ -402,9 +424,8 @@ def write_outputs(data):
 # main
 # ---------------------------------------------------------------------------
 def main():
-    if "你的域名" in WORKER_CHECK_URL:
-        die("未配置检测 Worker: 请在仓库 Settings → Secrets and variables → Actions → Secrets 添加 CHECK_WORKER (本地运行用环境变量 CHECK_WORKER)")
-    session = requests.Session()
+    if not os.path.exists(CHECKER_SCRIPT):
+        die(f"未找到内置检测器脚本: {CHECKER_SCRIPT}")
     rows, source = fetch_vpngate()
     raw_count = len(rows)
     if raw_count == 0:
@@ -423,21 +444,21 @@ def main():
     log("VPN GATE", f"SSTP 节点: {sstp_count}")
     log("VPN GATE", f"去重后: {len(uniq)}")
 
-    log("CLOUDFLARE WORKER", f"提交检测: {len(uniq)} (并发 {CONCURRENCY}, 单请求超时 {CHECK_TIMEOUT}s)")
+    log("SSTP CHECK", f"提交检测: {len(uniq)} (并发 {CONCURRENCY}, 单节点超时 {CHECK_TIMEOUT}s)")
     t0 = time.time()
-    results = check_all(uniq, session)
+    results = check_all(uniq)
     elapsed = time.time() - t0
 
     success = [r for r in results if r.get("success")]
     failed = [r for r in results if not r.get("success")]
-    worker_errors = [r for r in failed if r.get("worker_error")]
+    checker_errors = [r for r in failed if r.get("checker_error")]
 
-    log("CLOUDFLARE WORKER", f"检测成功: {len(success)}")
-    log("CLOUDFLARE WORKER", f"检测失败: {len(failed)}" + (f" (其中 Worker 异常 {len(worker_errors)})" if worker_errors else ""))
-    log("CLOUDFLARE WORKER", f"耗时: {elapsed:.1f}s")
+    log("SSTP CHECK", f"检测成功: {len(success)}")
+    log("SSTP CHECK", f"检测失败: {len(failed)}" + (f" (其中检测器异常 {len(checker_errors)})" if checker_errors else ""))
+    log("SSTP CHECK", f"耗时: {elapsed:.1f}s")
 
-    if uniq and not success and len(worker_errors) == len(uniq):
-        die("Worker 全部请求异常, 检测服务不可用 — 本次运行判定失败 (不生成空结果)")
+    if uniq and not success and len(checker_errors) == len(uniq):
+        die("检测器全部异常, 本次运行判定失败 (不生成空结果)")
 
     data = build_outputs(results, raw_count, sstp_count, source)
     log("RESULT", f"可用节点: {len(success)}")
