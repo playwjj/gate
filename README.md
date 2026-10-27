@@ -25,6 +25,7 @@
 | 要配置的 Secret | `CHECK_WORKER` | 无 |
 | Cloudflare 账号风险 | Worker 拨 VPN 隧道，可能被判定滥用 | 检测不经过 Cloudflare 账号 |
 | 检测方式 | Worker 拨通隧道并读出口 IP | 一样：真实拨通 SSTP 隧道，经隧道访问 iplocate.io 读出口 IP / ASN / 机房属性 |
+| PPP 认证 | — | PAP / CHAP-MD5 / MS-CHAPv2，与 VPS 端的 Go 客户端一致，并发送带 crypto binding 的 SSTP Call Connected |
 
 Cloudflare 现在只用于**入口**：域名解析、Cloudflare Tunnel，以及可选的 WARP 槽位（`GATE_WARP=0` 可关闭）。这些都是 Cloudflare 的常规用法，不涉及在 Cloudflare 上跑代理代码。
 

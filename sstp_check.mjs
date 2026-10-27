@@ -3,7 +3,8 @@
  * sstp_check.mjs — VPN Gate SSTP 节点批量检测器 (零依赖, Node >= 18)
  * ================================================================
  * 自己实现的 SSTP 客户端: TLS 连接节点 → SSTP_DUPLEX_POST 握手 →
- * PPP 协商 (LCP → PAP → IPCP) → 在 PPP 上跑一条最小 TCP 会话 →
+ * PPP 协商 (LCP → PAP / CHAP-MD5 / MS-CHAPv2 → SSTP Call Connected → IPCP) →
+ * 在 PPP 上跑一条最小 TCP 会话 →
  * 经隧道向 www.iplocate.io 发 HTTPS 请求, 以真实出口 IP 判定节点可用性,
  * 并带回出口的国家 / ASN / 机房属性。
  *
@@ -21,7 +22,7 @@ import net from 'node:net';
 import tls from 'node:tls';
 import dns from 'node:dns/promises';
 import { Duplex } from 'node:stream';
-import { randomUUID, randomInt } from 'node:crypto';
+import { randomUUID, randomInt, randomBytes, createHash, createHmac } from 'node:crypto';
 
 const SSTP_PATH = '/sra_{BA195980-CD49-458b-9E23-C84EE0ADCD75}/';
 const TARGET_HOST = 'www.iplocate.io';
@@ -52,6 +53,154 @@ function withTimeout(promise, ms, message) {
     timer = setTimeout(() => reject(new Error(message)), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// ---------------------------------------------------------------------------
+// MS-CHAPv2 (RFC 2759) + MPPE 主密钥 (RFC 3079), 与 sstp/mschap.go 一致
+// Node 17+ 的 OpenSSL 3 默认禁用 MD4 / DES, 这里用纯 JS 实现 (只需 MD4 摘要和 DES 单块加密)
+// ---------------------------------------------------------------------------
+function md4(input) {
+  const bitLen = input.length * 8;
+  const padLen = ((input.length + 8) >> 6 << 6) + 64;
+  const msg = Buffer.alloc(padLen);
+  input.copy(msg);
+  msg[input.length] = 0x80;
+  msg.writeUInt32LE(bitLen >>> 0, padLen - 8);
+  msg.writeUInt32LE(Math.floor(bitLen / 0x100000000), padLen - 4);
+  const rotl = (x, n) => (x << n) | (x >>> (32 - n));
+  let a = 0x67452301, b = 0xefcdab89, c = 0x98badcfe, d = 0x10325476;
+  const x = new Array(16);
+  for (let off = 0; off < padLen; off += 64) {
+    for (let i = 0; i < 16; i++) x[i] = msg.readUInt32LE(off + 4 * i);
+    const [aa, bb, cc, dd] = [a, b, c, d];
+    const f = (p, q, r) => (p & q) | (~p & r);
+    const g = (p, q, r) => (p & q) | (p & r) | (q & r);
+    const h = (p, q, r) => p ^ q ^ r;
+    for (const i of [0, 4, 8, 12]) {
+      a = rotl((a + f(b, c, d) + x[i]) | 0, 3);
+      d = rotl((d + f(a, b, c) + x[i + 1]) | 0, 7);
+      c = rotl((c + f(d, a, b) + x[i + 2]) | 0, 11);
+      b = rotl((b + f(c, d, a) + x[i + 3]) | 0, 19);
+    }
+    for (const i of [0, 1, 2, 3]) {
+      a = rotl((a + g(b, c, d) + x[i] + 0x5a827999) | 0, 3);
+      d = rotl((d + g(a, b, c) + x[i + 4] + 0x5a827999) | 0, 5);
+      c = rotl((c + g(d, a, b) + x[i + 8] + 0x5a827999) | 0, 9);
+      b = rotl((b + g(c, d, a) + x[i + 12] + 0x5a827999) | 0, 13);
+    }
+    for (const i of [0, 2, 1, 3]) {
+      a = rotl((a + h(b, c, d) + x[i] + 0x6ed9eba1) | 0, 3);
+      d = rotl((d + h(a, b, c) + x[i + 8] + 0x6ed9eba1) | 0, 9);
+      c = rotl((c + h(d, a, b) + x[i + 4] + 0x6ed9eba1) | 0, 11);
+      b = rotl((b + h(c, d, a) + x[i + 12] + 0x6ed9eba1) | 0, 15);
+    }
+    a = (a + aa) | 0; b = (b + bb) | 0; c = (c + cc) | 0; d = (d + dd) | 0;
+  }
+  const out = Buffer.alloc(16);
+  [a, b, c, d].forEach((v, i) => out.writeInt32LE(v, 4 * i));
+  return out;
+}
+
+const DES_IP = [58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6, 64, 56, 48, 40, 32, 24, 16, 8,
+  57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3, 61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7];
+const DES_FP = [40, 8, 48, 16, 56, 24, 64, 32, 39, 7, 47, 15, 55, 23, 63, 31, 38, 6, 46, 14, 54, 22, 62, 30, 37, 5, 45, 13, 53, 21, 61, 29,
+  36, 4, 44, 12, 52, 20, 60, 28, 35, 3, 43, 11, 51, 19, 59, 27, 34, 2, 42, 10, 50, 18, 58, 26, 33, 1, 41, 9, 49, 17, 57, 25];
+const DES_E = [32, 1, 2, 3, 4, 5, 4, 5, 6, 7, 8, 9, 8, 9, 10, 11, 12, 13, 12, 13, 14, 15, 16, 17,
+  16, 17, 18, 19, 20, 21, 20, 21, 22, 23, 24, 25, 24, 25, 26, 27, 28, 29, 28, 29, 30, 31, 32, 1];
+const DES_P = [16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10, 2, 8, 24, 14, 32, 27, 3, 9, 19, 13, 30, 6, 22, 11, 4, 25];
+const DES_PC1 = [57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 27, 19, 11, 3, 60, 52, 44, 36,
+  63, 55, 47, 39, 31, 23, 15, 7, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 28, 20, 12, 4];
+const DES_PC2 = [14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10, 23, 19, 12, 4, 26, 8, 16, 7, 27, 20, 13, 2,
+  41, 52, 31, 37, 47, 55, 30, 40, 51, 45, 33, 48, 44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32];
+const DES_SHIFTS = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1];
+const DES_S = [
+  [14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7, 0, 15, 7, 4, 14, 2, 13, 1, 10, 6, 12, 11, 9, 5, 3, 8,
+    4, 1, 14, 8, 13, 6, 2, 11, 15, 12, 9, 7, 3, 10, 5, 0, 15, 12, 8, 2, 4, 9, 1, 7, 5, 11, 3, 14, 10, 0, 6, 13],
+  [15, 1, 8, 14, 6, 11, 3, 4, 9, 7, 2, 13, 12, 0, 5, 10, 3, 13, 4, 7, 15, 2, 8, 14, 12, 0, 1, 10, 6, 9, 11, 5,
+    0, 14, 7, 11, 10, 4, 13, 1, 5, 8, 12, 6, 9, 3, 2, 15, 13, 8, 10, 1, 3, 15, 4, 2, 11, 6, 7, 12, 0, 5, 14, 9],
+  [10, 0, 9, 14, 6, 3, 15, 5, 1, 13, 12, 7, 11, 4, 2, 8, 13, 7, 0, 9, 3, 4, 6, 10, 2, 8, 5, 14, 12, 11, 15, 1,
+    13, 6, 4, 9, 8, 15, 3, 0, 11, 1, 2, 12, 5, 10, 14, 7, 1, 10, 13, 0, 6, 9, 8, 7, 4, 15, 14, 3, 11, 5, 2, 12],
+  [7, 13, 14, 3, 0, 6, 9, 10, 1, 2, 8, 5, 11, 12, 4, 15, 13, 8, 11, 5, 6, 15, 0, 3, 4, 7, 2, 12, 1, 10, 14, 9,
+    10, 6, 9, 0, 12, 11, 7, 13, 15, 1, 3, 14, 5, 2, 8, 4, 3, 15, 0, 6, 10, 1, 13, 8, 9, 4, 5, 11, 12, 7, 2, 14],
+  [2, 12, 4, 1, 7, 10, 11, 6, 8, 5, 3, 15, 13, 0, 14, 9, 14, 11, 2, 12, 4, 7, 13, 1, 5, 0, 15, 10, 3, 9, 8, 6,
+    4, 2, 1, 11, 10, 13, 7, 8, 15, 9, 12, 5, 6, 3, 0, 14, 11, 8, 12, 7, 1, 14, 2, 13, 6, 15, 0, 9, 10, 4, 5, 3],
+  [12, 1, 10, 15, 9, 2, 6, 8, 0, 13, 3, 4, 14, 7, 5, 11, 10, 15, 4, 2, 7, 12, 9, 5, 6, 1, 13, 14, 0, 11, 3, 8,
+    9, 14, 15, 5, 2, 8, 12, 3, 7, 0, 4, 10, 1, 13, 11, 6, 4, 3, 2, 12, 9, 5, 15, 10, 11, 14, 1, 7, 6, 0, 8, 13],
+  [4, 11, 2, 14, 15, 0, 8, 13, 3, 12, 9, 7, 5, 10, 6, 1, 13, 0, 11, 7, 4, 9, 1, 10, 14, 3, 5, 12, 2, 15, 8, 6,
+    1, 4, 11, 13, 12, 3, 7, 14, 10, 15, 6, 8, 0, 5, 9, 2, 6, 11, 13, 8, 1, 4, 10, 7, 9, 5, 0, 15, 14, 2, 3, 12],
+  [13, 2, 8, 4, 6, 15, 11, 1, 10, 9, 3, 14, 5, 0, 12, 7, 1, 15, 13, 8, 10, 3, 7, 4, 12, 5, 6, 11, 0, 14, 9, 2,
+    7, 11, 4, 1, 9, 12, 14, 2, 0, 6, 10, 13, 15, 3, 5, 8, 2, 1, 14, 7, 4, 10, 8, 13, 15, 12, 9, 0, 3, 5, 6, 11],
+];
+
+// DES 单块加密 (按位数组实现, 只在认证时调用 3 次, 不在乎性能); key / block 均为 8 字节
+function desEncryptBlock(key, block) {
+  const toBits = (buf) => [...buf].flatMap((byte) => [7, 6, 5, 4, 3, 2, 1, 0].map((i) => (byte >> i) & 1));
+  const permute = (bits, table) => table.map((i) => bits[i - 1]);
+  const keyBits = permute(toBits(key), DES_PC1);
+  let c = keyBits.slice(0, 28);
+  let d = keyBits.slice(28);
+  const subkeys = DES_SHIFTS.map((s) => {
+    c = [...c.slice(s), ...c.slice(0, s)];
+    d = [...d.slice(s), ...d.slice(0, s)];
+    return permute([...c, ...d], DES_PC2);
+  });
+  const ip = permute(toBits(block), DES_IP);
+  let l = ip.slice(0, 32);
+  let r = ip.slice(32);
+  for (const k of subkeys) {
+    const x = permute(r, DES_E).map((bit, i) => bit ^ k[i]);
+    const s = [];
+    for (let i = 0; i < 8; i++) {
+      const six = x.slice(6 * i, 6 * i + 6);
+      const v = DES_S[i][(six[0] << 5) | (six[5] << 4) | (six[1] << 3) | (six[2] << 2) | (six[3] << 1) | six[4]];
+      s.push((v >> 3) & 1, (v >> 2) & 1, (v >> 1) & 1, v & 1);
+    }
+    const f = permute(s, DES_P);
+    [l, r] = [r, l.map((bit, i) => bit ^ f[i])];
+  }
+  const bits = permute([...r, ...l], DES_FP);
+  return Buffer.from(Array.from({ length: 8 }, (_, i) => bits.slice(8 * i, 8 * i + 8).reduce((v, bit) => (v << 1) | bit, 0)));
+}
+
+// 7 字节密钥扩展成 8 字节 (校验位不管) 后加密
+function desEncrypt7(key7, block) {
+  const k = Buffer.from([
+    key7[0],
+    (key7[0] << 7) | (key7[1] >> 1),
+    (key7[1] << 6) | (key7[2] >> 2),
+    (key7[2] << 5) | (key7[3] >> 3),
+    (key7[3] << 4) | (key7[4] >> 4),
+    (key7[4] << 3) | (key7[5] >> 5),
+    (key7[5] << 2) | (key7[6] >> 6),
+    key7[6] << 1,
+  ].map((v) => v & 0xff));
+  return desEncryptBlock(k, block);
+}
+
+const sha1 = (...parts) => {
+  const h = createHash('sha1');
+  for (const p of parts) h.update(p);
+  return h.digest();
+};
+
+// 返回 49 字节的 Response 值 (PeerChallenge 16 + 保留 8 + NT-Response 24 + Flags 1) 和 HLAK
+function mschapv2(authChallenge, peerChallenge, username, password) {
+  const pwHash = md4(Buffer.from(password, 'utf16le'));
+  const challenge = sha1(peerChallenge, authChallenge, Buffer.from(username, 'utf8')).subarray(0, 8);
+  const z = Buffer.alloc(21);
+  pwHash.copy(z);
+  const nt = Buffer.concat([0, 1, 2].map((i) => desEncrypt7(z.subarray(7 * i, 7 * i + 7), challenge)));
+  const response = Buffer.alloc(49);
+  peerChallenge.copy(response);
+  nt.copy(response, 24);
+
+  const master = sha1(md4(pwHash), nt, Buffer.from('This is the MPPE Master Key')).subarray(0, 16);
+  const pad1 = Buffer.alloc(40);
+  const pad2 = Buffer.alloc(40, 0xf2);
+  const send = sha1(master, pad1, Buffer.from('On the client side, this is the send key; on the server side, it is the receive key.'), pad2).subarray(0, 16);
+  const recv = sha1(master, pad1, Buffer.from('On the client side, this is the receive key; on the server side, it is the send key.'), pad2).subarray(0, 16);
+  // HLAK = 客户端 MasterReceiveKey | MasterSendKey (MS-SSTP 3.2.5.2.3, 和 sstp-client 一致)
+  return { response, hlak: Buffer.concat([recv, send]) };
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +312,7 @@ class SstpClient {
       Math.min(this.remaining(), 10000),
       'SSTP server connection timed out',
     );
+    this.certRaw = socket.getPeerCertificate()?.raw ?? EMPTY; // crypto binding 要用服务器证书的哈希
     this.reader = new ByteReader(socket);
   }
 
@@ -202,6 +352,37 @@ class SstpClient {
       attr.data.copy(packet, offset + 4);
       offset += 4 + attr.data.length;
     }
+    return packet;
+  }
+
+  // 控制包 body (已去掉 4 字节 SSTP 头): 消息类型 2 + 属性数 2 + 属性 (保留 1 + ID 1 + 长度 2 + 值)
+  parseControl(body) {
+    const attrs = new Map();
+    if (body.length < 4) return { type: 0, attrs };
+    for (let offset = 4; offset + 4 <= body.length;) {
+      const length = u16(body, offset + 2) & 0x0fff;
+      if (length < 4 || offset + length > body.length) break;
+      attrs.set(body[offset + 1], body.subarray(offset + 4, offset + length));
+      offset += length;
+    }
+    return { type: u16(body, 0), attrs };
+  }
+
+  // Call Connected + crypto binding (MS-SSTP 3.2.5.2), 与 sstp/sstp.go 的 callConnected 一致:
+  // 证书哈希 + 用 HLAK 派生的 CMK 对整包算 Compound MAC
+  buildCallConnected(bindRequest, hlak) {
+    const useSha256 = (bindRequest[3] & 0x02) !== 0;
+    const algorithm = useSha256 ? 'sha256' : 'sha1';
+    const value = Buffer.alloc(100); // 保留 3 + hash 协议 1 + nonce 32 + 证书哈希 32 + Compound MAC 32
+    value[3] = useSha256 ? 2 : 1;
+    bindRequest.copy(value, 4, 4, 36);
+    createHash(algorithm).update(this.certRaw).digest().copy(value, 36);
+    const packet = this.buildControlPacket(0x0004, [{ id: 3, data: value }]);
+    // CMK = PRF+(HLAK, "SSTP inner method derived CMK", len) 的第一块 T1 = HMAC(HLAK, seed | len(2 字节小端) | 0x01)
+    const size = useSha256 ? 32 : 20;
+    const seed = Buffer.concat([Buffer.from('SSTP inner method derived CMK'), Buffer.from([size & 0xff, size >> 8, 1])]);
+    const cmk = createHmac(algorithm, hlak).update(seed).digest();
+    createHmac(algorithm, cmk).update(packet).digest().copy(packet, packet.length - 32);
     return packet;
   }
 
@@ -315,43 +496,82 @@ class SstpClient {
 
     let localLcpAcked = false;
     let peerLcpAcked = false;
-    let papRequired = false;
+    let authProto = 0; // 服务器在 LCP 里要求的认证: 0 = 不认证, 0xc023 = PAP, 0xc223 = CHAP
+    let authAlgo = 0; // CHAP 算法: 0x81 = MS-CHAPv2, 0x05 = MD5
+    let authNaks = 0;
     let papSent = false;
-    let papDone = false;
+    let authDone = false;
+    let hlak = Buffer.alloc(32); // PAP / CHAP-MD5 没有密钥材料, HLAK 按规范取全 0
+    let connectAcked = false;
+    let bindRequest = null;
+    let connectedSent = false;
     let ipcpStarted = false;
     let ipcpFinished = false;
     let assignedIp = null;
 
+    const lcpOpen = () => localLcpAcked && peerLcpAcked;
     const sendPapIfReady = async () => {
-      if (!localLcpAcked || !peerLcpAcked || !papRequired || papSent) return;
+      if (!lcpOpen() || authProto !== 0xc023 || papSent) return;
       await this.write(this.buildDataPacket(this.buildPapRequest(this.pppId++)));
       papSent = true;
     };
+    // 认证完成 (或无需认证) 后: 先发 SSTP Call Connected (带 crypto binding), 再开始 IPCP
     const startIpcpIfReady = async () => {
-      if (!localLcpAcked || !peerLcpAcked || ipcpStarted || (papRequired && !papDone)) return;
+      if (!lcpOpen() || !connectAcked || ipcpStarted || (authProto && !authDone)) return;
+      if (bindRequest && !connectedSent) {
+        await this.write(this.buildCallConnected(bindRequest, hlak));
+        connectedSent = true;
+      }
       await this.write(this.buildDataPacket(this.buildConfigurePacket(0x8021, 1, this.pppId++, [
         { type: 3, data: Buffer.alloc(4) },
       ])));
       ipcpStarted = true;
     };
 
-    for (let round = 0; round < 50 && !ipcpFinished; round++) {
+    for (let round = 0; round < 100 && !ipcpFinished; round++) {
       const packet = await this.readPacket();
-      if (packet.isControl) continue;
+      if (packet.isControl) {
+        const { type, attrs } = this.parseControl(packet.body);
+        if (type === 0x0002) { // Call Connect Ack: 记下 crypto binding 请求 (nonce + 支持的哈希)
+          connectAcked = true;
+          const req = attrs.get(4);
+          bindRequest = req && req.length >= 36 ? req : null;
+          await startIpcpIfReady();
+        } else if (type === 0x0003) {
+          throw new Error('SSTP Call Connect Request rejected');
+        } else if (type === 0x0005 || type === 0x0006) {
+          throw new Error('SSTP server aborted the call');
+        } else if (type === 0x0008) { // Echo Request
+          await this.write(this.buildControlPacket(0x0009, []));
+        }
+        continue;
+      }
 
       const ppp = this.parsePppFrame(packet.body);
       if (!ppp) continue;
 
       if (ppp.protocol === 0xc021) { // LCP
-        if (ppp.code === 1) { // Configure-Request → Ack
+        if (ppp.code === 1) { // Configure-Request → Ack (认证方式不支持时 Nak)
           const authOption = this.parseOptions(ppp.payload).find((o) => o.type === 3);
+          let proto = 0;
+          let algo = 0;
           if (authOption && authOption.data.length >= 2) {
-            const authProtocol = u16(authOption.data, 0);
-            if (authProtocol !== 0xc023) {
-              throw new Error(`SSTP unsupported PPP authentication protocol: 0x${authProtocol.toString(16)}`);
+            proto = u16(authOption.data, 0);
+            algo = authOption.data.length === 3 ? authOption.data[2] : 0;
+            const supported = proto === 0xc023 || (proto === 0xc223 && (algo === 0x81 || algo === 0x05));
+            if (!supported) {
+              // 和 sstp/ppp.go 一样 Nak 并建议 MS-CHAPv2, 服务器会换一种认证方式重新发 Configure-Request
+              if (++authNaks > 3) {
+                throw new Error(`SSTP unsupported PPP authentication protocol: 0x${proto.toString(16)}`);
+              }
+              await this.write(this.buildDataPacket(this.buildConfigurePacket(0xc021, 3, ppp.id, [
+                { type: 3, data: Buffer.from([0xc2, 0x23, 0x81]) },
+              ])));
+              continue;
             }
-            papRequired = true;
           }
+          authProto = proto;
+          authAlgo = algo;
           const ack = Buffer.from(ppp.rawPacket);
           ack[2] = 2;
           await this.write(this.buildDataPacket(ack));
@@ -362,16 +582,52 @@ class SstpClient {
           localLcpAcked = true;
           await sendPapIfReady();
           await startIpcpIfReady();
+        } else if (ppp.code === 5) { // Terminate-Request
+          throw new Error('SSTP server terminated the PPP session');
+        } else if (ppp.code === 9) { // Echo-Request → Echo-Reply (没有协商 Magic-Number, 填 0)
+          await this.write(this.buildDataPacket(Buffer.from([0xc0, 0x21, 10, ppp.id, 0, 8, 0, 0, 0, 0])));
         }
         continue;
       }
 
       if (ppp.protocol === 0xc023) { // PAP
         if (ppp.code === 2) {
-          papDone = true;
+          authDone = true;
           await startIpcpIfReady();
         } else if (ppp.code === 3) {
           throw new Error('SSTP PAP authentication failed');
+        }
+        continue;
+      }
+
+      if (ppp.protocol === 0xc223) { // CHAP
+        if (ppp.code === 1) { // Challenge → Response
+          const size = ppp.payload[0];
+          if (!size || ppp.payload.length < 1 + size) continue;
+          const challenge = ppp.payload.subarray(1, 1 + size);
+          let value;
+          if (authAlgo === 0x81 && challenge.length === 16) {
+            ({ response: value, hlak } = mschapv2(challenge, randomBytes(16), this.username, this.password));
+          } else if (authAlgo === 0x05) {
+            value = createHash('md5').update(Buffer.from([ppp.id])).update(this.password, 'utf8').update(challenge).digest();
+          } else {
+            throw new Error(`SSTP unsupported CHAP algorithm: 0x${authAlgo.toString(16)}`);
+          }
+          const user = Buffer.from(this.username, 'utf8');
+          const frame = Buffer.alloc(7 + value.length + user.length);
+          frame.writeUInt16BE(0xc223, 0);
+          frame[2] = 2;
+          frame[3] = ppp.id;
+          frame.writeUInt16BE(frame.length - 2, 4);
+          frame[6] = value.length;
+          value.copy(frame, 7);
+          user.copy(frame, 7 + value.length);
+          await this.write(this.buildDataPacket(frame));
+        } else if (ppp.code === 3) { // Success
+          authDone = true;
+          await startIpcpIfReady();
+        } else if (ppp.code === 4) { // Failure
+          throw new Error(`SSTP CHAP authentication failed: ${ppp.payload.toString('latin1')}`);
         }
         continue;
       }
