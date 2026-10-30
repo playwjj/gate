@@ -878,15 +878,14 @@ class TcpOverPpp extends Duplex {
 // ---------------------------------------------------------------------------
 // 单节点检测: 建隧道 → 经隧道 HTTPS GET iplocate /api/lookup → 出口信息
 // ---------------------------------------------------------------------------
-async function checkNode(node, timeoutMs) {
+async function checkNode(node, timeoutMs, targetIps) {
   const startedAt = Date.now();
   const client = new SstpClient(node, timeoutMs);
   let session = null;
   try {
-    const targetIpPromise = dns.resolve4(TARGET_HOST).then((ips) => ips[0]);
     await client.connect();
-    const [sourceIp, targetIp] = await Promise.all([client.establishTunnel(), targetIpPromise]);
-    if (!targetIp) throw new Error(`cannot resolve ${TARGET_HOST}`);
+    const sourceIp = await client.establishTunnel();
+    const targetIp = targetIps[randomInt(targetIps.length)];
 
     session = new TcpOverPpp(client, sourceIp, targetIp, TARGET_PORT);
     const pump = session.pumpLoop();
@@ -996,6 +995,20 @@ async function main() {
   const nodes = Array.isArray(input.nodes) ? input.nodes : [];
   const concurrency = Math.max(1, input.concurrency || 32);
   const timeoutMs = Math.max(1000, input.timeoutMs || 30000);
+  // 目标地址只解析一次: 每个节点各解析一次既浪费, 解析失败时还会变成未处理的 rejection 把整个进程带崩
+  let targetIps = [];
+  for (let attempt = 1; attempt <= 3 && !targetIps.length; attempt += 1) {
+    try {
+      targetIps = await dns.resolve4(TARGET_HOST);
+    } catch (err) {
+      console.error(`resolve ${TARGET_HOST} failed (attempt ${attempt}): ${err?.message || err}`);
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  if (!targetIps.length) throw new Error(`cannot resolve ${TARGET_HOST}`);
+  if (targetIps.some((ip) => /^198\.1[89]\./.test(ip))) {
+    console.error(`warning: ${TARGET_HOST} resolved to ${targetIps.join(',')} (198.18.0.0/15, fake-ip proxy?) — checks through the tunnel will time out`);
+  }
 
   const results = new Array(nodes.length);
   let cursor = 0;
@@ -1004,18 +1017,17 @@ async function main() {
     for (;;) {
       const index = cursor++;
       if (index >= nodes.length) return;
-      let result = await checkNode(nodes[index], timeoutMs);
+      let result = await checkNode(nodes[index], timeoutMs, targetIps);
       // iplocate 对热门出口 IP (如 SoftEther 共享 NAT 池) 会限流 429:
       // 这类节点隧道本身是通的, 整节点重试一次 (新隧道) 往往就能过
       if (!result.success && result.httpStatus === 429) {
         await new Promise((r) => setTimeout(r, 3000));
-        const retry = await checkNode(nodes[index], timeoutMs);
-        retry.responseTime += result.responseTime;
+        const retry = await checkNode(nodes[index], timeoutMs, targetIps);
         // 重试没拿到出口信息 (仍被限流, 或这次隧道超时 / 被断开) 时, 以第一次为准:
         // 第一次已经收到目标的 HTTP 响应, 隧道验证过可用, 记为成功, 出口信息留空
         result = retry.success
           ? retry
-          : { ...result, success: true, error: null, responseTime: retry.responseTime };
+          : { ...result, success: true, error: null };
       }
       delete result.httpStatus;
       results[index] = result;

@@ -256,7 +256,8 @@ def probe(k):
 
 
 def slot_healthy(k):
-    return slot_ip(k) is not None and probe(k)
+    # 探测失败再试一次: 一次偶发超时就换掉节点并拉黑 1 小时太亏
+    return slot_ip(k) is not None and (probe(k) or probe(k))
 
 
 def stop_slot(k):
@@ -369,11 +370,6 @@ def sync(cfg):
             else:
                 seen_ips[ip] = k
 
-    try:
-        all_nodes = fetch_nodes(cfg["NODES_URL"])
-    except Exception as e:
-        log(f"拉取 nodes.txt 失败: {e}")
-        all_nodes = []
     state.pop("entries", None)
 
     broken = [k for k in slots if not health[k]]
@@ -387,6 +383,11 @@ def sync(cfg):
         stop_slot(k)
 
     if broken:
+        try:
+            all_nodes = fetch_nodes(cfg["NODES_URL"])
+        except Exception as e:
+            log(f"拉取 nodes.txt 失败: {e}")
+            all_nodes = []
         nodes = order_candidates(all_nodes, cfg.get("NODE_SEED", ""))
         in_use = {s["node"] for s in state["slots"].values()}
         queue = [n for n in nodes if n["node"] not in in_use and n["node"] not in state["bad"]]

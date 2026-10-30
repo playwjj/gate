@@ -42,7 +42,7 @@ VPNGATE_MIRROR = os.environ.get(
 # 内置 SSTP 检测器 (Node.js 脚本, 与本文件同目录; 不再依赖外部检测 Worker)
 CHECKER_SCRIPT = os.path.join(REPO_DIR, "sstp_check.mjs")
 CONCURRENCY = max(1, int(os.environ.get("CHECK_CONCURRENCY", "32")))
-CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT", "90"))
+CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT", "45"))
 MAX_CHECK_NODES = int(os.environ.get("MAX_CHECK_NODES", "0"))
 HTTP_TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "60"))
 PUBLIC_DIR = os.environ.get("PUBLIC_DIR", os.path.join(REPO_DIR, "public"))
@@ -458,8 +458,9 @@ def main():
     log("SSTP CHECK", f"检测失败: {len(failed)}" + (f" (其中检测器异常 {len(checker_errors)})" if checker_errors else ""))
     log("SSTP CHECK", f"耗时: {elapsed:.1f}s")
 
-    if uniq and not success and len(checker_errors) == len(uniq):
-        die("检测器全部异常, 本次运行判定失败 (不生成空结果)")
+    if uniq and not success:
+        # 多半是运行环境网络问题而不是节点全挂; 失败退出则 Pages 保留上一次的 nodes.txt, VPS 仍有候选节点可换
+        die("没有任何可用节点, 本次运行判定失败 (不发布空的 nodes.txt)")
 
     data = build_outputs(results, raw_count, sstp_count, source)
     log("RESULT", f"可用节点: {len(success)}")
@@ -469,7 +470,7 @@ def main():
     log("WEBSITE", f"生成 {os.path.relpath(data_path, REPO_DIR)}")
     log("WEBSITE", f"生成 {os.path.relpath(html_path, REPO_DIR)}")
     log("WEBSITE", f"生成 {os.path.relpath(nodes_path, REPO_DIR)}")
-    log("WEBSITE", "完成 (GitHub Pages 部署由 workflow 执行)")
+    log("WEBSITE", f"完成 (GitHub Pages 部署由 workflow 执行), 发布后 nodes.txt 地址: {NODES_URL}")
 
 if __name__ == "__main__":
     try:
