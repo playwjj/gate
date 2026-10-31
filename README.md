@@ -1,4 +1,4 @@
-# VPN Gate SSTP 家宽节点 🚀
+<h1 align="center">VPN Gate SSTP 家宽节点 🚀</h1>
 
 自动抓取 [VPN Gate](https://www.vpngate.net/) 的 SSTP 家宽/机房节点，逐个验证可用性，按国家分组、标注住宅/机房，再由 VPS 上的 SSTP 客户端连接这些节点，以 VLESS 订阅的形式提供给客户端。**每 30 分钟自动更新一次。**
 
